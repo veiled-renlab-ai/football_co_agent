@@ -152,7 +152,12 @@ class MotorController:
 # ---------------------------------------------------------------------------
 
 class MoveToController(MotorController):
-    """Walk/sprint toward (target_x, target_y). Done within EPSILON of target."""
+    """Walk/sprint toward (target_x, target_y).
+
+    On arrival: stay 'in_progress' with IDLE so sticky direction carries
+    the player past the target naturally. Real players don't slam-stop when
+    they reach a position — they keep moving until told otherwise.
+    """
 
     def step(self, obs: dict) -> tuple[int, SkillStatus]:
         self.tick_count += 1
@@ -160,15 +165,19 @@ class MoveToController(MotorController):
         pos, _ = self._self_pos_vel(obs)
         dx = skill.target_x - float(pos[0])
         dy = skill.target_y - float(pos[1])
-        if math.hypot(dx, dy) < self.EPSILON:
-            return A.RELEASE_DIRECTION, "completed"
         if skill.urgency == "sprint" and self.tick_count == 1:
             return A.SPRINT, "in_progress"
+        if math.hypot(dx, dy) < self.EPSILON:
+            return A.IDLE, "in_progress"  # sticky direction continues
         return vector_to_action(dx, dy), "in_progress"
 
 
 class DribbleTowardController(MotorController):
-    """Like MoveTo but with DRIBBLE sticky on; fails if we lose possession."""
+    """Like MoveTo but with DRIBBLE sticky on. Same continuity rule:
+    arrived → stay in_progress with IDLE so sticky carries the player.
+    Only failure case is loss of possession (-> 'failed', async runner
+    swaps to fallback that picks a no-ball skill).
+    """
 
     def step(self, obs: dict) -> tuple[int, SkillStatus]:
         self.tick_count += 1
@@ -178,11 +187,10 @@ class DribbleTowardController(MotorController):
         pos, _ = self._self_pos_vel(obs)
         dx = skill.target_x - pos[0]
         dy = skill.target_y - pos[1]
-        if math.hypot(dx, dy) < self.EPSILON:
-            return A.RELEASE_DRIBBLE, "completed"
-        # First tick: enable dribble sticky
         if self.tick_count == 1:
             return A.DRIBBLE, "in_progress"
+        if math.hypot(dx, dy) < self.EPSILON:
+            return A.IDLE, "in_progress"  # sticky direction carries us
         return vector_to_action(dx, dy), "in_progress"
 
 

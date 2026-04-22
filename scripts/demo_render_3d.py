@@ -1,16 +1,13 @@
-"""Phase 4 demo with REAL-TIME 3D window via WSLg.
+"""Phase 4 demo with REAL-TIME 3D window via WSLg + ASYNC LLM.
 
-Per gfootball/doc/api.md, calling render() (or create_environment(render=True))
-opens an SDL-based real-time 3D window. With WSLg available (DISPLAY=:0,
-WAYLAND_DISPLAY=wayland-0), the window appears directly on the Windows desktop.
-
-Tradeoff: rendering slows env.step() significantly — expect maybe 10-20s
-per LLM decision (LLM call ~1-3s + 8 rendered ticks ~5-15s).
+The env ticks at gfootball's native rate on the main thread (3D window
+stays smooth). The LLM decides in a background thread; new skills are
+swapped in atomically. Between LLM decisions, a 'body rest-state'
+fallback (slow dribble / jog) keeps the player moving — mirrors how
+real footballers keep moving while their brain considers the next play.
 
 Run from WSL with venv active:
-    python3 scripts/demo_render_3d.py
-
-Watch for the gfootball window popping up on your Windows desktop.
+    python3 -u scripts/demo_render_3d.py
 """
 from __future__ import annotations
 
@@ -22,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from football_agents.agent import LLMPlayer
+from football_agents.async_runner import AsyncRunner
 from football_agents.env import FootballEnvAdapter
 from football_agents.llm_client import LLMClient
 
@@ -43,21 +41,16 @@ def short_skill(skill) -> str:
 
 def main() -> None:
     print("=" * 78)
-    print("Phase 4 demo with REAL-TIME 3D WINDOW (via WSLg)")
+    print("Phase 4 demo — REAL-TIME 3D + ASYNC LLM")
     print("Watch your Windows desktop — gfootball window should pop up.")
     print("=" * 78)
 
     client = LLMClient.from_env()
     print(f"LLM model: {client.model}\n")
 
-    # render=True opens the SDL 3D window via WSLg.
-    # n_controlled_left=2 + primary_player_slot=1 explicitly drives the attacker
-    # (player #1, CB role); the GK (slot #0) gets IDLE. Without this, gfootball
-    # auto-control starts on the GK and only switches when the ball moves —
-    # demo wastes decisions on the wrong player.
-    # Custom scenario llm_solo_attack: 3000 ticks, no possession-change
-    # termination, no goal-end termination — continuous football.
-    # Defined in venv: site-packages/gfootball/scenarios/llm_solo_attack.py
+    # Custom scenario llm_solo_attack: 3000 ticks, no premature termination.
+    # Multi-agent control: explicitly drive slot 1 (the attacker), slot 0
+    # (the GK) gets IDLE so it doesn't wander.
     env = FootballEnvAdapter(
         scenario="llm_solo_attack",
         render=True,
@@ -71,51 +64,62 @@ def main() -> None:
 
     agent = LLMPlayer(player_id=pid, role=role, llm_client=client)
 
-    decision_count = 0
-    max_decisions = 100000   # let env.done (game_duration reached) be the only stop
-    t0 = time.monotonic()
-
-    while not env.done and decision_count < max_decisions:
-        if obs.self_state.player_id != agent.player_id or obs.self_state.role != agent.role:
-            agent.player_id = obs.self_state.player_id
-            agent.update_role(obs.self_state.role)
-
-        decision_count += 1
-        t_dec = time.monotonic()
-        skill = agent.choose_skill(obs)
-        dec_dt = time.monotonic() - t_dec
-        last = agent.history[-1]
-
+    def on_decision(log: dict) -> None:
+        last = agent.history[-1] if agent.history else None
+        reasoning = last.reasoning if last and last.reasoning else ""
+        err = last.error if last and last.error else None
         print("─" * 78)
-        print(f"Decision #{decision_count}  (tick={env.tick}, LLM took {dec_dt:.1f}s)")
-        if last.reasoning:
-            print(f"  💭 {last.reasoning}")
-        if last.error:
-            print(f"  ⚠️  {last.error}  → fallback to {short_skill(skill)}")
+        print(f"#{log['decision']:>2}  env_tick={log['env_tick']:>4d}  "
+              f"obs_tick={log['obs_tick']:>4d}  lag={log['lag_ticks']:>3d}t  "
+              f"llm={log['llm_seconds']:.1f}s")
+        if reasoning:
+            print(f"  💭 {reasoning}")
+        if err:
+            print(f"  ⚠️  {err}  →  fallback {short_skill(log['skill'])}")
         else:
-            print(f"  🎯 {short_skill(skill)}")
-
-        # max_env_ticks=4 keeps the game clock advancing in small steps
-        # (instead of jumping ~14 sim sec per LLM decision); smoother to watch.
-        status = env.dispatch_skill(skill, max_env_ticks=4)
-        obs = env.observe()
-        s = obs.self_state
-        ball_str = f"my_ball={s.has_ball}"
-        if (b := obs.ball()) is not None:
+            print(f"  🎯 {short_skill(log['skill'])}")
+        s = log_obs = env.observe()
+        ss = s.self_state
+        ball_str = f"my_ball={ss.has_ball}"
+        if (b := s.ball()) is not None:
             ball_str += f"  ball@({b.position.x:+.2f},{b.position.y:+.2f}) d={b.distance:.2f}"
-        print(f"  → {status}  reward={env.cumulative_reward:+.1f}  "
-              f"pos=({s.position.x:+.2f},{s.position.y:+.2f}) {ball_str}")
+        print(f"     reward={env.cumulative_reward:+.1f}  "
+              f"pos=({ss.position.x:+.2f},{ss.position.y:+.2f}) {ball_str}")
 
-    total_dt = time.monotonic() - t0
+    runner = AsyncRunner(
+        env=env,
+        agent=agent,
+        # fallback_policy=None → uses body_rest_state_fallback by default
+        # (slow dribble if has-ball, slow jog to ball otherwise)
+        obs_refresh_every_ticks=4,
+        max_decisions=200,
+        max_wall_seconds=300.0,
+        on_decision=on_decision,
+    )
+
+    print("Running... 3D should be smooth, LLM decisions land async.")
+    t0 = time.monotonic()
+    result = runner.run()
+    wall = time.monotonic() - t0
+
     print()
     print("=" * 78)
-    if env.cumulative_reward > 0:
-        print(f"✅ GOAL!  reward={env.cumulative_reward:+.1f}  in {decision_count} decisions, {total_dt:.1f}s wall")
+    if result["cumulative_reward"] > 0:
+        verdict = f"✅ {int(result['cumulative_reward'])} GOAL(S)  reward={result['cumulative_reward']:+.1f}"
     elif env.done:
-        print(f"⏹  Episode ended  reward={env.cumulative_reward:+.1f}")
+        verdict = f"⏹  episode ended  reward={result['cumulative_reward']:+.1f}"
     else:
-        print(f"⏱  Decision cap hit  reward={env.cumulative_reward:+.1f}")
+        verdict = f"⏱  cap hit  reward={result['cumulative_reward']:+.1f}"
+    print(
+        f"{verdict}  |  {result['decisions']} LLM decisions  |  "
+        f"{result['env_ticks']} env ticks  |  {wall:.1f}s wall"
+    )
+    if result["decisions"] > 0:
+        avg_llm = sum(d["llm_seconds"] for d in result["log"]) / result["decisions"]
+        avg_lag = sum(d["lag_ticks"] for d in result["log"]) / result["decisions"]
+        print(f"avg LLM latency: {avg_llm:.2f}s  |  avg obs->action lag: {avg_lag:.1f} ticks")
     print("=" * 78)
+
     env.close()
 
 
