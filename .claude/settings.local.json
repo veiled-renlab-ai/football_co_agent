@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh repo *)",
+      "Bash(pip --version)",
+      "Bash(pip show *)",
+      "Bash(pip index *)",
+      "Bash(conda env *)",
+      "Bash(wsl --status)",
+      "Bash(wsl --list --verbose)",
+      "Bash(where docker *)",
+      "Bash(docker --version)",
+      "Bash(powershell.exe -Command \"Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux 2>&1 | Select-Object FeatureName,State; Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform 2>&1 | Select-Object FeatureName,State\")",
+      "Bash(npm --version)",
+      "Bash(pnpm --version)",
+      "Bash(wsl.exe -d Ubuntu-22.04 -- bash -lc 'source ~/football-env/bin/activate && echo \"=== python: $\\(which python3\\) ===\" && echo \"=== fixing gym version ===\" && pip install \"gym==0.25.2\" 2>&1 | tail -8 && echo \"\" && echo \"=== running smoke test ===\" && python3 /mnt/c/Users/dfgfd/Desktop/football/smoke_test_gfootball.py')",
+      "Bash(wsl.exe -d Ubuntu-22.04 -- bash -lc 'source ~/football-env/bin/activate && cd /mnt/c/Users/dfgfd/Desktop/football && python3 -c \" *)",
+      "Bash(wsl.exe -d Ubuntu-22.04 -- bash -lc 'source ~/football-env/bin/activate && cd /mnt/c/Users/dfgfd/Desktop/football && python3 scripts/inspect_gfootball_obs.py 2>&1 | head -100')",
+      "Bash(wsl.exe -d Ubuntu-22.04 -- bash -lc 'source ~/football-env/bin/activate && cd /mnt/c/Users/dfgfd/Desktop/football && python3 scripts/verify_motor.py 2>&1')",
+      "Bash(wsl.exe -d Ubuntu-22.04 -- bash -lc 'source ~/football-env/bin/activate && cd /mnt/c/Users/dfgfd/Desktop/football && python3 scripts/verify_phase3.py 2>&1')",
+      "Bash(wsl.exe -d Ubuntu-22.04 -- bash -lc 'source ~/football-env/bin/activate && cd /mnt/c/Users/dfgfd/Desktop/football && pip install python-dotenv openai 2>&1 | tail -3 && echo \"\" && python3 scripts/demo_single_agent.py 2>&1')",
+      "Bash(wsl.exe -d Ubuntu-22.04 -- bash -lc 'sudo -n true 2>/dev/null && echo \"passwordless sudo ok\" || echo \"qwerasdf\" | sudo -S apt install -y ffmpeg xvfb 2>&1 | tail -5')",
+      "Bash(wsl.exe -d Ubuntu-22.04 -- bash -lc 'source ~/football-env/bin/activate && cd /mnt/c/Users/dfgfd/Desktop/football && xvfb-run -a python3 scripts/demo_with_video.py 2>&1')",
+      "Bash(wsl.exe -d Ubuntu-22.04 -- bash -lc 'source ~/football-env/bin/activate && cd /mnt/c/Users/dfgfd/Desktop/football && xvfb-run -a python3 scripts/demo_with_video.py 2>&1 | head -120')",
+      "Bash(wsl.exe -d Ubuntu-22.04 -- bash -lc 'cat /home/dfgfd/football-env/lib/python3.10/site-packages/gfootball/doc/observation.md 2>/dev/null | head -10; echo \"---\"; ls /home/dfgfd/football-env/lib/python3.10/site-packages/gfootball/doc/ 2>&1; echo \"---\"; ls /home/dfgfd/football-env/lib/python3.10/site-packages/gfootball/examples/ 2>&1')",
+      "Bash(wsl.exe -d Ubuntu-22.04 -- bash -lc 'echo \"=== saving_replays.md ===\"; cat /home/dfgfd/football-env/lib/python3.10/site-packages/gfootball/doc/saving_replays.md; echo \"\"; echo \"=== api.md ===\"; cat /home/dfgfd/football-env/lib/python3.10/site-packages/gfootball/doc/api.md')",
+      "Bash(wsl.exe -d Ubuntu-22.04 -- bash -lc 'ls /home/dfgfd/football-env/lib/python3.10/site-packages/gfootball/ | head -30; echo \"---\"; ls /home/dfgfd/football-env/lib/python3.10/site-packages/gfootball/env/ | head -30')",
+      "Bash(wsl.exe -d Ubuntu-22.04 -- bash -lc 'source ~/football-env/bin/activate && cd /mnt/c/Users/dfgfd/Desktop/football && rm -rf replays && python3 scripts/demo_with_video.py 2>&1')",
+      "Bash(wsl.exe -d Ubuntu-22.04 -- bash -lc 'source ~/football-env/bin/activate && python -c \"import gfootball; print\\(gfootball.__file__\\)\"')",
+      "Bash(wsl.exe -d Ubuntu-22.04 -- bash -lc 'source ~/football-env/bin/activate && python -c \"import gfootball; import os; print\\(os.path.dirname\\(gfootball.__file__\\)\\)\"')",
+      "Bash(wsl.exe -d *)"
+    ]
+  }
+}
