@@ -365,8 +365,14 @@ class EgocentricFilter:
             has_ball=has_ball,
         )
 
+    # Env ticks per game second. gfootball's PHYSICS_STEPS_PER_SECOND=100;
+    # with FootballEnvAdapter's default physics_steps_per_frame=2, each
+    # env.step advances game by 20ms = 1/50 sec → 50 env ticks per game sec.
+    # If you change physics_steps_per_frame in env.py, recompute this:
+    #   ENV_TICKS_PER_GAME_SECOND = 100 // physics_steps_per_frame
+    ENV_TICKS_PER_GAME_SECOND: int = 50
+
     @staticmethod
     def _format_clock(tick: int) -> str:
-        # gfootball runs ~10 env ticks per simulated second by default.
-        sec = tick // 10
+        sec = tick // EgocentricFilter.ENV_TICKS_PER_GAME_SECOND
         return f"{sec // 60:02d}:{sec % 60:02d}"

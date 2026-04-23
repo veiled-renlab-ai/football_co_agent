@@ -90,16 +90,28 @@ class MultiAgentRunner:
         obs_refresh_every_ticks: int = 4,
         max_decisions_total: int = 200,
         max_wall_seconds: float = 300.0,
+        target_wall_fps: float = 50.0,
         on_decision: Optional[Callable[[dict], None]] = None,
     ) -> None:
         """
         Game-time pace is controlled by gfootball's `physics_steps_per_frame`
-        config (set in FootballEnvAdapter), NOT by main-loop sleeping.
-        gfootball does PHYSICS_STEPS_PER_SECOND=100 internal physics ticks
-        per game second; physics_steps_per_frame=N means each env.step
-        advances the game by N/100 seconds. Smaller N = slower game time
-        per render frame, while render frame rate stays high.
-        See FootballEnvAdapter(physics_steps_per_frame=...) to tune.
+        config (set in FootballEnvAdapter). gfootball has PHYSICS_STEPS_PER_SECOND=100
+        internal physics ticks per game second; physics_steps_per_frame=N
+        means each env.step advances the game by N/100 seconds.
+
+        For the visible clock (HUD in render) to match wall time:
+          wall_fps * physics_steps_per_frame * 0.01 sec = 1.0
+          → wall_fps * pps = 100
+          e.g. pps=2 + wall_fps=50 → exactly 1.0x real-time.
+
+        `target_wall_fps` caps the main env-step loop to this wall-clock rate
+        via a small sleep after env.step_actions. Default 50 Hz pairs with
+        env's default physics_steps_per_frame=2 for exact real-time pacing.
+        Render is still at this rate (one render per env.step), but 50 fps
+        is smooth to the eye (vs the previously-tried 10 fps which felt choppy).
+
+        Set to 0 to disable the cap (env runs as fast as it can; with the
+        default pps=2 that's ~1.16x real-time on most machines).
         """
         # --- validate agent slots (silent corruption guard) ---
         slots = [a.slot for a in agents]
@@ -119,6 +131,9 @@ class MultiAgentRunner:
         self.obs_refresh_every_ticks = obs_refresh_every_ticks
         self.max_decisions_total = max_decisions_total
         self.max_wall_seconds = max_wall_seconds
+        self._target_tick_dt = (
+            1.0 / target_wall_fps if target_wall_fps and target_wall_fps > 0 else 0.0
+        )
         self._on_decision_cb = on_decision
 
         self._decisions_completed: int = 0
@@ -162,6 +177,7 @@ class MultiAgentRunner:
                 time.sleep(0.05)
 
         wall_start = time.monotonic()
+        last_tick_wall = time.monotonic()
         # Initial last-push-tick; vary by agent so refresh cadence stays staggered
         # even after the startup jitter.
         last_obs_push_tick: dict[int, int] = {
@@ -223,6 +239,17 @@ class MultiAgentRunner:
                         obs = a.perceive(self.env.raw_obs, self.env.tick)
                         a.push_observation(obs)
                         last_obs_push_tick[a.player_id] = self.env.tick
+
+                # ---- 6. Cap wall-clock tick rate for game=wall alignment ----
+                # With default pps=2 + 50 fps wall cap: 50*2*0.01 = 1.0 game
+                # sec / wall sec exactly. 50 fps is smooth enough to not feel
+                # choppy. Disable by constructing with target_wall_fps=0.
+                if self._target_tick_dt > 0:
+                    elapsed = time.monotonic() - last_tick_wall
+                    sleep_for = self._target_tick_dt - elapsed
+                    if sleep_for > 0:
+                        time.sleep(sleep_for)
+                    last_tick_wall = time.monotonic()
         finally:
             self._stop_flag.set()
             for a in self.agents:
