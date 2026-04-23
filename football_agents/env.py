@@ -44,6 +44,7 @@ class FootballEnvAdapter:
         write_video: bool = False,
         logdir: Optional[str] = None,
         n_controlled_left: int = 1,
+        n_controlled_right: int = 0,
         primary_player_slot: int = 0,
         controlled_player_id: Optional[int] = None,  # legacy, only affects filter
         physics_steps_per_frame: int = 2,
@@ -76,6 +77,8 @@ class FootballEnvAdapter:
         self.scenario = scenario
         self.team_side = team_side
         self.n_controlled_left = n_controlled_left
+        self.n_controlled_right = n_controlled_right
+        self.n_controlled_total = n_controlled_left + n_controlled_right
         self.primary_player_slot = primary_player_slot
         # Per gfootball/doc/saving_replays.md: write_video=True works WITHOUT
         # render=True; gfootball auto-generates a simple 2D animation. Real-time
@@ -85,6 +88,7 @@ class FootballEnvAdapter:
             representation="raw",
             render=render,
             number_of_left_players_agent_controls=n_controlled_left,
+            number_of_right_players_agent_controls=n_controlled_right,
             other_config_options={
                 "physics_steps_per_frame": int(physics_steps_per_frame),
                 "real_time": bool(real_time),
@@ -136,8 +140,10 @@ class FootballEnvAdapter:
         # in single-agent it's a single dict (or list of 1).
         if isinstance(raw, list):
             self._raw_obs = raw[self.primary_player_slot]
+            self._raw_obs_list = list(raw)
         else:
             self._raw_obs = raw
+            self._raw_obs_list = [raw]
         self._tick = 0
         self._done = False
         self._cumulative_reward = 0.0
@@ -216,20 +222,21 @@ class FootballEnvAdapter:
         """MULTI-AGENT: step the env with one action per controlled slot.
 
         For MultiAgentRunner where each of N players is independently
-        controlled by its own PlayerAgent. The list length MUST equal
-        n_controlled_left, ordered by slot index.
+        controlled by its own PlayerAgent. List length MUST equal
+        n_controlled_left + n_controlled_right (total controlled slots).
+        Order: [left slot 0, ..., left slot n_left-1, right slot 0, ...,
+        right slot n_right-1].
 
-        Differences from step_action(int):
-          - Takes ALL N actions explicitly (no IDLE-filling).
-          - Stores raw_obs as raw[0] — the canonical god-view. All N raw
-            views share identical world state; they differ only in the
-            `active` field, which is meaningless when controlling all N
-            players. Per-player perception filters in PlayerAgent use
-            their explicit player_id, not raw_obs["active"].
+        Stores both:
+          - self._raw_obs       : raw[0]  (canonical god-view, left-side perspective)
+          - self._raw_obs_list  : full list of N raw obs (one per controlled slot,
+                                  with that slot's perspective). Used by
+                                  PlayerAgent.perceive via raw_obs_for_slot(i).
         """
-        if len(actions) != self.n_controlled_left:
+        if len(actions) != self.n_controlled_total:
             raise ValueError(
-                f"step_actions: expected {self.n_controlled_left} actions, "
+                f"step_actions: expected {self.n_controlled_total} "
+                f"({self.n_controlled_left} L + {self.n_controlled_right} R), "
                 f"got {len(actions)}"
             )
         step_arg = [int(a) for a in actions]
@@ -240,12 +247,26 @@ class FootballEnvAdapter:
         else:
             raw, reward, done, _info = result
             done = bool(done)
-        # Multi-agent canonical god-view: take raw[0] (or raw if not a list).
-        # All slot views are identical except for `active`, which we don't use.
-        self._raw_obs = raw[0] if isinstance(raw, list) else raw
+        if isinstance(raw, list):
+            self._raw_obs = raw[0]          # canonical god-view (left perspective)
+            self._raw_obs_list = list(raw)  # full per-slot views
+        else:
+            self._raw_obs = raw
+            self._raw_obs_list = [raw]
         self._cumulative_reward += float(np.asarray(reward).sum())
         self._done = done
         self._tick += 1
+
+    def raw_obs_for_slot(self, slot: int) -> dict:
+        """Return the per-slot raw observation (gfootball already mirrors
+        right-team views so each agent thinks of '+x' as opponent goal)."""
+        if not hasattr(self, "_raw_obs_list") or self._raw_obs_list is None:
+            raise RuntimeError("Call reset() / step_actions first.")
+        if not (0 <= slot < len(self._raw_obs_list)):
+            raise IndexError(
+                f"slot {slot} out of range [0, {len(self._raw_obs_list)})"
+            )
+        return self._raw_obs_list[slot]
 
     def set_last_skill(self, name: str, status: SkillStatus) -> None:
         """Mark the most-recently-active skill so the next observe() reflects it."""

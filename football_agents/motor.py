@@ -162,6 +162,18 @@ class MotorController:
             and obs["ball_owned_player"] == self._resolve_self_idx(obs)
         )
 
+    def _selfframe_target_to_abs(
+        self, target_x: float, target_y: float,
+    ) -> tuple[float, float]:
+        """LLM gives target_x/target_y in self-frame (+x = opp goal). For
+        team_b (right side), mirror both axes to absolute. Perception layer
+        does the inverse transform on world coords seen by the LLM, so the
+        contract is: LLM always thinks +x = opp goal, motor handles reality.
+        """
+        if self.team_side == "right":
+            return -target_x, -target_y
+        return target_x, target_y
+
     def _opponent_goal_x(self) -> float:
         return 1.0 if self.team_side == "left" else -1.0
 
@@ -209,8 +221,10 @@ class MoveToController(MotorController):
         self.tick_count += 1
         skill: MoveTo = self.skill  # type: ignore[assignment]
         pos, _ = self._self_pos_vel(obs)
-        dx = skill.target_x - float(pos[0])
-        dy = skill.target_y - float(pos[1])
+        # Convert LLM target from self-frame to absolute frame
+        tgt_x, tgt_y = self._selfframe_target_to_abs(skill.target_x, skill.target_y)
+        dx = tgt_x - float(pos[0])
+        dy = tgt_y - float(pos[1])
 
         # Tick 1: enforce sprint state per LLM urgency
         if self.tick_count == 1:
@@ -219,9 +233,7 @@ class MoveToController(MotorController):
             return A.RELEASE_SPRINT, "in_progress"
 
         # First-time arrival: latch + release sticky direction so momentum
-        # decays naturally instead of overshooting. Latching prevents the
-        # oscillation bug — once arrived, never push direction again
-        # (until controller is replaced by a new skill).
+        # decays naturally instead of overshooting.
         if not self._arrived and math.hypot(dx, dy) < self.EPSILON:
             self._arrived = True
             return A.RELEASE_DIRECTION, "in_progress"
@@ -258,8 +270,10 @@ class DribbleTowardController(MotorController):
         if not self._has_ball(obs):
             return A.RELEASE_DRIBBLE, "failed"
         pos, _ = self._self_pos_vel(obs)
-        dx = skill.target_x - pos[0]
-        dy = skill.target_y - pos[1]
+        # Convert LLM target from self-frame to absolute frame
+        tgt_x, tgt_y = self._selfframe_target_to_abs(skill.target_x, skill.target_y)
+        dx = tgt_x - float(pos[0])
+        dy = tgt_y - float(pos[1])
 
         # Tick 1: enable DRIBBLE sticky (shielding stance)
         if self.tick_count == 1:
@@ -271,19 +285,14 @@ class DribbleTowardController(MotorController):
                 return A.SPRINT, "in_progress"
             return A.RELEASE_SPRINT, "in_progress"
 
-        # First-time arrival: latch + release direction (kills overshoot
-        # momentum and prevents the back-and-forth oscillation that fires
-        # when sticky direction carries us past the target).
+        # First-time arrival: latch + release direction.
         if not self._arrived and math.hypot(dx, dy) < self.EPSILON:
             self._arrived = True
             return A.RELEASE_DIRECTION, "in_progress"
 
-        # Already arrived — stay still (DRIBBLE sticky still active for
-        # ball-shielding; just no direction push)
         if self._arrived:
             return A.IDLE, "in_progress"
 
-        # Push direction every tick — smooth continuous dribble
         return vector_to_action(dx, dy), "in_progress"
 
 

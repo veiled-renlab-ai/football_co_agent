@@ -175,8 +175,11 @@ class EgocentricFilter:
         self.player_id = player_id
         self.team = team
         self.role = role
-        # Default facing: toward the opponent goal (+x for team_a / left side, -x for team_b)
-        self._last_facing_deg = 0.0 if team == "team_a" else 180.0
+        # Self-frame mirror sign: team_a uses absolute (sign=+1), team_b
+        # mirrors both axes (sign=-1) so the LLM always thinks +x = opp goal.
+        self._sign = 1 if team == "team_a" else -1
+        # Default facing in self-frame: toward opponent goal = +x for ALL agents.
+        self._last_facing_deg = 0.0
         # Tracked entity ids — always force-included in perceived_entities
         # regardless of FOV / distance / attention cap. Set via track_entity().
         # The id is interpreted in BOTH teams (LLM doesn't distinguish on Track skill);
@@ -223,11 +226,19 @@ class EgocentricFilter:
         team_idx = 0 if self.team == "team_a" else 1
         opp_team_idx = 1 - team_idx
 
+        # SELF-FRAME conversion: every LLM thinks "+x = opponent goal".
+        # gfootball uses absolute coords (left team at -x, right at +x).
+        # For team_b (right side), we mirror BOTH axes (180° rotation) so
+        # the LLM's mental model is consistent across teams. Motor layer
+        # mirrors LLM-provided target coords back to absolute when
+        # commanding gfootball.
+        sign = 1 if self.team == "team_a" else -1
+
         # ---- self ---------------------------------------------------------
         self_pos_arr = god_view[team_key][self.player_id]
         self_vel_arr = god_view[f"{team_key}_direction"][self.player_id]
-        self_pos = Vec2(float(self_pos_arr[0]), float(self_pos_arr[1]))
-        self_vel = Vec2(float(self_vel_arr[0]), float(self_vel_arr[1]))
+        self_pos = Vec2(sign * float(self_pos_arr[0]), sign * float(self_pos_arr[1]))
+        self_vel = Vec2(sign * float(self_vel_arr[0]), sign * float(self_vel_arr[1]))
 
         # Update facing if we're moving fast enough to reorient
         speed = math.hypot(self_vel.x, self_vel.y)
@@ -255,7 +266,7 @@ class EgocentricFilter:
         # ---- candidate entities ------------------------------------------
         candidates: list[tuple[float, EntityView]] = []  # (distance, view)
 
-        # Teammates (skip self)
+        # Teammates (skip self) — mirror coords for team_b via _make_entity_view
         for i, pos in enumerate(god_view[team_key]):
             if i == self.player_id:
                 continue
@@ -285,11 +296,10 @@ class EgocentricFilter:
             if ev is not None:
                 candidates.append((ev.distance, ev))
 
-        # Ball — always perceived (a real player sees the ball anywhere
-        # on the pitch as long as they're looking that way / it's loud).
-        # No distance gate; the ball is the most important entity.
+        # Ball — always perceived. Mirror coords via self._sign for team_b.
         ball_xyz = god_view["ball"]
-        ball_pos = Vec2(float(ball_xyz[0]), float(ball_xyz[1]))
+        ball_pos = Vec2(self._sign * float(ball_xyz[0]),
+                        self._sign * float(ball_xyz[1]))
         ball_dist = self_pos.distance_to(ball_pos)
         ball_dir = god_view["ball_direction"]
         candidates.append((
@@ -298,7 +308,8 @@ class EgocentricFilter:
                 entity_id=self.BALL_ENTITY_ID,
                 role="ball",
                 position=ball_pos,
-                velocity=Vec2(float(ball_dir[0]), float(ball_dir[1])),
+                velocity=Vec2(self._sign * float(ball_dir[0]),
+                              self._sign * float(ball_dir[1])),
                 distance=ball_dist,
                 in_current_fov=True,
                 has_ball=False,
@@ -328,12 +339,17 @@ class EgocentricFilter:
                         continue
                     pos = arr[tid]
                     vel = god_view[f"{tk}_direction"][tid]
+                    # Mirror to self-frame for team_b
+                    ent_pos = Vec2(self._sign * float(pos[0]),
+                                   self._sign * float(pos[1]))
+                    ent_vel = Vec2(self._sign * float(vel[0]),
+                                   self._sign * float(vel[1]))
                     forced = EntityView(
                         entity_id=tid,
                         role=role_label,
-                        position=Vec2(float(pos[0]), float(pos[1])),
-                        velocity=Vec2(float(vel[0]), float(vel[1])),
-                        distance=self_pos.distance_to(Vec2(float(pos[0]), float(pos[1]))),
+                        position=ent_pos,
+                        velocity=ent_vel,
+                        distance=self_pos.distance_to(ent_pos),
                         in_current_fov=False,  # tracked, not actually seen this tick
                         age_ticks=0,
                         has_ball=(
@@ -387,33 +403,34 @@ class EgocentricFilter:
         facing_deg: float,
         has_ball: bool,
     ) -> Optional[EntityView]:
-        dx = float(pos[0]) - self_pos.x
-        dy = float(pos[1]) - self_pos.y
+        # Apply self-frame mirror (sign=-1 for team_b) to entity position
+        # and velocity. self_pos is already in self-frame (mirrored in filter).
+        ent_x = self._sign * float(pos[0])
+        ent_y = self._sign * float(pos[1])
+        dx = ent_x - self_pos.x
+        dy = ent_y - self_pos.y
         distance = math.hypot(dx, dy)
 
         # FOV is the ONLY visibility gate — distance does not filter entities
         # out, only their velocity-detail level (see SIGHT_DISTANCE_FULL below).
-        # Real footballers can see the entire pitch within their facing cone;
-        # the ATTENTION_CAP further down handles cognitive load.
         # When _scan_behind_pending is set (LLM picked ScanBehind last decision),
-        # the FOV check is bypassed for one observation — the brain glances
-        # backward. The flag is cleared at the end of filter().
+        # the FOV check is bypassed for one observation.
         if not self._scan_behind_pending:
             bearing_deg = math.degrees(math.atan2(dy, dx))
             relative = (bearing_deg - facing_deg + 540.0) % 360.0 - 180.0
             if abs(relative) > FOV_HALF_ANGLE_DEG:
                 return None  # not in FOV (no v0 memory)
 
-        # Within FULL radius: full info incl. velocity. Beyond FULL: position
-        # only (you can SEE a far player but can't read their body angle precisely).
+        # Within FULL radius: full info incl. velocity. Beyond: position only.
         velocity = None
         if distance <= SIGHT_DISTANCE_FULL:
-            velocity = Vec2(float(vel[0]), float(vel[1]))
+            velocity = Vec2(self._sign * float(vel[0]),
+                            self._sign * float(vel[1]))
 
         return EntityView(
             entity_id=entity_id,
             role=role,
-            position=Vec2(float(pos[0]), float(pos[1])),
+            position=Vec2(ent_x, ent_y),
             velocity=velocity,
             distance=distance,
             in_current_fov=True,

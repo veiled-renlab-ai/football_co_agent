@@ -117,16 +117,18 @@ class MultiAgentRunner:
         slots = [a.slot for a in agents]
         if len(set(slots)) != len(slots):
             raise ValueError(f"duplicate agent slots: {slots}")
-        if any(s < 0 or s >= env.n_controlled_left for s in slots):
+        n_total = env.n_controlled_total
+        if any(s < 0 or s >= n_total for s in slots):
             raise ValueError(
-                f"agent slot out of range [0, {env.n_controlled_left}): {slots}"
+                f"agent slot out of range [0, {n_total}) "
+                f"(L={env.n_controlled_left}, R={env.n_controlled_right}): {slots}"
             )
         # Sort agents by slot so action list assembly is deterministic.
         agents = sorted(agents, key=lambda a: a.slot)
 
         self.env = env
         self.agents = agents
-        self.n_slots = env.n_controlled_left
+        self.n_slots = n_total
         self._fallback_policy = fallback_policy or body_rest_state_fallback
         self.obs_refresh_every_ticks = obs_refresh_every_ticks
         self.max_decisions_total = max_decisions_total
