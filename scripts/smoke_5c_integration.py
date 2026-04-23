@@ -55,35 +55,36 @@ def main() -> None:
     client = LLMClient.from_env()  # uses .env for real API config (no actual call)
     print(f"\n[1] Bus + Client created. Lifetime={TeamMessageBus.MESSAGE_LIFETIME_TICKS} ticks")
 
-    # 2. Build 4 PlayerAgents (left team, with bus + team-profile personas)
+    # 2. Build 5 PlayerAgents (left team, with bus + team-profile personas)
+    # TEAM_BLUE_5V5 now has 5 entries: GK + 4 outfield (after Phase 5d).
     agents = []
-    for slot in range(4):
+    for slot in range(5):
         agents.append(
             PlayerAgent(
-                slot=slot, player_id=slot + 1, team_side="left", role="CM",
+                slot=slot, player_id=slot, team_side="left", role="CM",
                 persona=TEAM_BLUE_5V5[slot], llm_client=client, bus=bus,
             )
         )
-    print(f"[2] Built 4 PlayerAgents on left team (王浩/陈宇/周俊/高磊)")
+    print(f"[2] Built 5 PlayerAgents on left team (林涛 GK / 王浩 / 陈宇 / 周俊 / 高磊)")
     print(f"    All share the same bus: {all(a.bus is bus for a in agents)}")
     print(f"    All have team_profile: {all(a.persona.team_profile is not None for a in agents)}")
 
     # 3. Verify system prompt has team-style section
-    sp = build_system_prompt(agents[0].persona)
+    sp = build_system_prompt(agents[1].persona)  # 王浩
     assert "我们球队（蓝队）的风格" in sp, "team section missing"
     assert "传控渗透" in sp, "team character missing"
     print(f"[3] System prompt for 王浩 includes 蓝队 team-style section ✓")
 
-    # 4. Have agent[0] (王浩 #11) call out
+    # 4. Have agent[1] (王浩 #11) call out
     raw_obs = _fake_god_view()
-    agents[0].install_skill(
+    agents[1].install_skill(
         Call(message="传给我，禁区前沿！", audience="team"),
         tick=100, raw_obs=raw_obs,
     )
-    print(f"[4] 王浩 (pid=1) posted: Call('传给我，禁区前沿！')")
+    print(f"[4] 王浩 (pid=1, jersey #11) posted: Call('传给我，禁区前沿！')")
 
-    # 5. Have agent[1] (陈宇 #9) perceive — should hear 王浩's call
-    obs = agents[1].perceive(raw_obs, tick=110)
+    # 5. Have agent[2] (陈宇 #9) perceive — should hear 王浩's call
+    obs = agents[2].perceive(raw_obs, tick=110)
     assert len(obs.heard_calls) == 1, f"expected 1 heard call, got {len(obs.heard_calls)}"
     heard = obs.heard_calls[0]
     assert heard.sender_jersey == 11, f"sender jersey wrong: {heard.sender_jersey}"
@@ -91,7 +92,7 @@ def main() -> None:
     print(f"[5] 陈宇 hears: {heard.sender_jersey} 号 '{heard.message}' (age={heard.age_ticks} ticks)")
 
     # 6. Render that observation as Chinese prompt — should include the call
-    rendered = render_observation(obs, agents[1].persona)
+    rendered = render_observation(obs, agents[2].persona)
     assert "你听到队友的喊话" in rendered, "heard_calls section missing in render"
     assert "传给我，禁区前沿" in rendered, "call message missing in render"
     print(f"[6] render_observation for 陈宇 includes the heard call ✓")
@@ -102,13 +103,13 @@ def main() -> None:
         if "听到" in line or "号（在" in line or "陈宇" in line:
             print(f"    {line}")
 
-    # 7. 王浩 himself shouldn't hear his own call
-    obs_self = agents[0].perceive(raw_obs, tick=110)
+    # 7. 王浩 himself shouldn't hear his own call (sender = agents[1])
+    obs_self = agents[1].perceive(raw_obs, tick=110)
     assert len(obs_self.heard_calls) == 0, "agent should not hear own call"
     print(f"\n[7] 王浩 doesn't hear own call (self-filter works) ✓")
 
     # 8. After 30+ ticks, message expires
-    obs_late = agents[1].perceive(raw_obs, tick=200)
+    obs_late = agents[2].perceive(raw_obs, tick=200)
     assert len(obs_late.heard_calls) == 0, "stale messages should be filtered"
     print(f"[8] After 100 ticks, 陈宇 no longer hears stale call (TTL works) ✓")
 

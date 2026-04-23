@@ -197,6 +197,73 @@ def _describe_velocity(v: Vec2) -> str:
     return "现在全速冲刺（sprint）"
 
 
+def _describe_entity_motion(
+    entity_pos: Vec2, entity_vel: Vec2, self_pos: Vec2
+) -> str:
+    """Brief Chinese motion phrase for a perceived entity, relative to listener.
+
+    Compares entity velocity vector against (self_pos - entity_pos) direction:
+      - dot > +0.7  → "正向你跑来" (toward listener)
+      - dot < -0.7  → "正在远离" (away from listener)
+      - else        → "横向移动" (perpendicular)
+
+    If the entity is essentially stationary, returns "原地".
+    Speed bucket prefix is omitted to keep it ≤ ~6 Chinese chars.
+    Returns empty string if the input is degenerate (no useful info).
+    """
+    import math
+    speed = math.hypot(entity_vel.x, entity_vel.y)
+    if speed < 0.0008:
+        return "原地"
+    # Direction from entity toward self
+    dx = self_pos.x - entity_pos.x
+    dy = self_pos.y - entity_pos.y
+    rel_dist = math.hypot(dx, dy)
+    if rel_dist < 1e-6:
+        # Right on top of listener — call it "贴近你"
+        return "贴近你"
+    # Unit vectors then dot product (cosine of angle between vel and toward-self)
+    ux, uy = dx / rel_dist, dy / rel_dist
+    vx, vy = entity_vel.x / speed, entity_vel.y / speed
+    dot = ux * vx + uy * vy
+    if dot > 0.7:
+        verdict = "向你跑来"
+    elif dot < -0.7:
+        verdict = "正在远离"
+    else:
+        verdict = "横向移动"
+    # Optional speed prefix — keep terse
+    if speed >= 0.0035:
+        prefix = "全速"
+    elif speed >= 0.0020:
+        prefix = "中速"
+    else:
+        prefix = ""
+    return f"{prefix}{verdict}"
+
+
+def _describe_ball_motion(ball_pos: Vec2, ball_vel: Vec2, self_pos: Vec2) -> str:
+    """Brief Chinese motion phrase for the ball, relative to listener."""
+    import math
+    speed = math.hypot(ball_vel.x, ball_vel.y)
+    if speed < 0.0008:
+        return "球静止"
+    dx = self_pos.x - ball_pos.x
+    dy = self_pos.y - ball_pos.y
+    rel_dist = math.hypot(dx, dy)
+    if rel_dist < 1e-6:
+        return "球贴近你"
+    ux, uy = dx / rel_dist, dy / rel_dist
+    vx, vy = ball_vel.x / speed, ball_vel.y / speed
+    dot = ux * vx + uy * vy
+    if dot > 0.7:
+        return "球正滚向你"
+    elif dot < -0.7:
+        return "球正滚开"
+    else:
+        return "球横向滚动"
+
+
 def _describe_facing(facing_deg: float) -> str:
     """Which way the body is currently pointing, in football terms.
     +x (deg≈0) = toward opponent goal (forward when attacking left→right)
@@ -268,14 +335,20 @@ def render_observation(obs: Observation, persona: PlayerPersona) -> str:
                 else:
                     carrier_line = (
                         f"🔴 **球在对方 {e.entity_id} 号脚下** —— "
-                        f"距你 {_describe_distance(e.distance)}。 你可以上抢、盯防、铲球。"
+                        f"位置 {_describe_position(e.position)}，距你 {_describe_distance(e.distance)}。"
+                        " 你可以上抢、盯防、铲球。"
                     )
                 break
         if carrier_line is None:
             # Loose ball — nobody controls it
+            ball_motion = ""
+            if ball.velocity is not None:
+                phrase = _describe_ball_motion(ball.position, ball.velocity, s.position)
+                if phrase:
+                    ball_motion = f"，{phrase}"
             carrier_line = (
                 f"⚠️ **球是散球，没人控制**！位置在{_describe_position(ball.position)}，"
-                f"距你 {_describe_distance(ball.distance)}。"
+                f"距你 {_describe_distance(ball.distance)}{ball_motion}。"
                 " **你目前没有控球**，要先跑过去把球带住才能射门/传球/带球。"
             )
         lines.append(carrier_line)
@@ -289,9 +362,14 @@ def render_observation(obs: Observation, persona: PlayerPersona) -> str:
         lines.append(f"你视野里的队友（共 {len(teammates)} 人）：")
         for t in teammates:
             tag = " 【持球】" if t.has_ball else ""
+            motion = ""
+            if t.velocity is not None:
+                phrase = _describe_entity_motion(t.position, t.velocity, s.position)
+                if phrase:
+                    motion = f"，{phrase}"
             lines.append(
                 f"  • {t.entity_id} 号 在{_describe_position(t.position)}，"
-                f"距你 {_describe_distance(t.distance)}{tag}"
+                f"距你 {_describe_distance(t.distance)}{motion}{tag}"
             )
     else:
         lines.append(
@@ -323,9 +401,14 @@ def render_observation(obs: Observation, persona: PlayerPersona) -> str:
         lines.append(f"你视野里的对手（共 {len(opponents)} 人）：")
         for o in opponents:
             tag = " 【持球】" if o.has_ball else ""
+            motion = ""
+            if o.velocity is not None:
+                phrase = _describe_entity_motion(o.position, o.velocity, s.position)
+                if phrase:
+                    motion = f"，{phrase}"
             lines.append(
                 f"  • {o.entity_id} 号 在{_describe_position(o.position)}，"
-                f"距你 {_describe_distance(o.distance)}{tag}"
+                f"距你 {_describe_distance(o.distance)}{motion}{tag}"
             )
     else:
         lines.append("**你视野里没有任何对手**（前路畅通）。")

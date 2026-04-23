@@ -369,15 +369,46 @@ class EgocentricFilter:
         # Pull any Call messages this player can hear from the team bus
         # (Phase 5c). Bus is optional — single-agent demos leave it None
         # and get an empty heard_calls list.
+        #
+        # FRAME CONTRACT: the bus stores `sender_position` in ABSOLUTE
+        # coords (player_agent.py posts the raw gfootball pos). But our
+        # `self_pos` here is in SELF-FRAME (mirrored for team_b). If we
+        # passed self_pos directly, the bus would compare distances across
+        # mismatched frames — for team_b, every nearby teammate would
+        # appear ~1.0+ units away and the audience='nearby' filter would
+        # reject them all.
+        #
+        # Fix: pass the listener's ABSOLUTE position into the bus (un-mirror
+        # via self._sign), then mirror the returned HeardCall.sender_position
+        # BACK to self-frame so prompts.py can render it from the listener's
+        # POV. For team_a (sign=+1) both transforms are no-ops.
         heard: list = []
         if self._bus is not None:
             channel = "left" if self.team == "team_a" else "right"
-            heard = self._bus.read_for(
+            listener_pos_abs = Vec2(self._sign * self_pos.x,
+                                    self._sign * self_pos.y)
+            heard_abs = self._bus.read_for(
                 team=channel,
                 listener_id=self.player_id,
-                listener_position=self_pos,
+                listener_position=listener_pos_abs,
                 current_tick=tick,
             )
+            # Mirror sender_position into self-frame for the listener's
+            # display. Local import avoids the TYPE_CHECKING-only import
+            # at module top (HeardCall isn't available at runtime up there).
+            from .message_bus import HeardCall as _HeardCall
+            heard = [
+                _HeardCall(
+                    sender_player_id=h.sender_player_id,
+                    sender_jersey=h.sender_jersey,
+                    sender_position=Vec2(self._sign * h.sender_position.x,
+                                         self._sign * h.sender_position.y),
+                    message=h.message,
+                    audience=h.audience,
+                    age_ticks=h.age_ticks,
+                )
+                for h in heard_abs
+            ]
 
         return Observation(
             tick=tick,

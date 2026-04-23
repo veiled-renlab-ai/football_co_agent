@@ -366,7 +366,14 @@ class ShootController(MotorController):
         if self.tick_count == 1:
             self_pos, _ = self._self_pos_vel(obs)
             goal_x = self._opponent_goal_x()
-            goal_y = self.ZONE_Y_BIAS.get(skill.target_zone, 0.0)
+            # SELF-FRAME y mirror: the LLM thinks "+y = its visual down"
+            # (ShootZone "top_*" → bias = -0.04 absolute). For team_b (right
+            # side) the perception layer mirrors y, so the LLM's "top" is
+            # absolute +y. Without this sign-flip, team_b shooting "top_left"
+            # would aim at absolute -0.04 = its own visual BOTTOM. Mirror
+            # via the same sign convention used in perception/motor.
+            sign = 1 if self.team_side == "left" else -1
+            goal_y = sign * self.ZONE_Y_BIAS.get(skill.target_zone, 0.0)
             dx = goal_x - float(self_pos[0])
             dy = goal_y - float(self_pos[1])
             return vector_to_action(dx, dy), "in_progress"

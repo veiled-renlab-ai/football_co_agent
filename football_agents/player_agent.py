@@ -41,11 +41,19 @@ from .message_bus import Message, TeamMessageBus
 from .motor import MotorController, SkillStatus, make_controller
 from .perception import EgocentricFilter, Observation, Role, Team, Vec2
 from .prompts import PlayerPersona
-from .skills import Call, ScanBehind, Skill, Track
+from .skills import Call, ReceiveBall, ScanBehind, Skill, Track
 
 logger = logging.getLogger(__name__)
 
 TeamSide = str  # "left" | "right"
+
+# Skills whose semantics are "do something to perception / comms / intent
+# WITHOUT changing what the body is currently doing". install_skill()
+# applies their side-effect and updates last_skill_name, but does NOT
+# replace self.current_controller — so the body keeps sprinting /
+# dribbling / walking the fallback while the LLM's intent is recorded.
+# See install_skill() docstring for rationale.
+_SIDE_EFFECT_ONLY_SKILLS: tuple[type, ...] = (Track, ScanBehind, Call, ReceiveBall)
 
 
 def _replace_in_queue(q: Queue, item) -> None:
@@ -174,6 +182,22 @@ class PlayerAgent:
             Call silently no-ops (logs a warning) and only the motor side
             of the skill runs (which is IdleController — no-op anyway).
 
+        Side-effect-only skills (Track, ScanBehind, Call, ReceiveBall):
+            These skills express intent / perception flips / comms — NOT
+            new body motion. We deliberately DO NOT replace
+            self.current_controller for these. The body keeps doing
+            whatever the previously-installed motor controller was doing
+            (sprinting toward goal, dribbling, walking the fallback) so
+            the LLM's "shout WHILE running" / "glance back WHILE moving"
+            / "lock onto opponent WHILE dribbling" / "prep to receive
+            WHILE moving toward expected spot" semantics are preserved.
+
+            Without this, the previous code would replace current_controller
+            with IdleController (or no-op ScanBehindController), the body
+            would stop for one tick, status="completed" propagates, and
+            MultiAgentRunner re-arms a fallback walk next tick — turning
+            "shout while running" into "shout INSTEAD of running".
+
         Args:
             skill: the chosen Skill instance.
             tick: env tick at install time. Required for Call to actually
@@ -185,6 +209,8 @@ class PlayerAgent:
                 position from raw_obs[team_key][player_id]). Defaults to
                 None for backward compatibility.
         """
+        # Side-effect dispatch — applies regardless of whether we replace
+        # the motor controller below.
         if isinstance(skill, Track):
             try:
                 self.perception.track_entity(skill.entity_id)
@@ -203,6 +229,19 @@ class PlayerAgent:
                 )
         elif isinstance(skill, Call):
             self._post_call(skill, tick=tick, raw_obs=raw_obs)
+        # ReceiveBall: pure intent record, no side-effect.
+
+        # Side-effect-only skills do NOT replace the motor controller —
+        # body keeps doing whatever the previous controller was doing.
+        # Just record the LLM's pick (for logs / next-obs last_skill).
+        # last_skill_status is left untouched: it's owned by the still-
+        # active previous controller and will be overwritten by the next
+        # step_motor() call.
+        if isinstance(skill, _SIDE_EFFECT_ONLY_SKILLS):
+            self.last_skill_name = type(skill).__name__
+            return
+
+        # Motor skill — replace controller as before.
         self.current_controller = make_controller(
             skill, team_side=self.team_side, player_id=self.player_id,
         )
