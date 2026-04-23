@@ -161,6 +161,24 @@ class EgocentricFilter:
         self.role = role
         # Default facing: toward the opponent goal (+x for team_a / left side, -x for team_b)
         self._last_facing_deg = 0.0 if team == "team_a" else 180.0
+        # Tracked entity ids — always force-included in perceived_entities
+        # regardless of FOV / distance / attention cap. Set via track_entity().
+        # The id is interpreted in BOTH teams (LLM doesn't distinguish on Track skill);
+        # whichever exists gets added.
+        self._tracked_entity_ids: set[int] = set()
+
+    # ----- public side-effect API used when LLM picks Track skill -----
+
+    def track_entity(self, entity_id: int) -> None:
+        """Add an entity to the tracked set. From now on, this entity is
+        always included in perceived_entities regardless of FOV, distance,
+        or attention cap.
+        """
+        self._tracked_entity_ids.add(int(entity_id))
+
+    def untrack_entity(self, entity_id: int) -> None:
+        """Remove an entity from the tracked set."""
+        self._tracked_entity_ids.discard(int(entity_id))
 
     def filter(self, god_view: dict, tick: int) -> Observation:
         team_key = "left_team" if self.team == "team_a" else "right_team"
@@ -252,6 +270,41 @@ class EgocentricFilter:
         # ---- attention cap ----------------------------------------------
         candidates.sort(key=lambda x: x[0])  # nearest first
         perceived = [ev for _, ev in candidates[:ATTENTION_CAP]]
+
+        # ---- forced inclusion of tracked entities (perception layer's
+        # implementation of the Track skill — bypasses FOV/distance/cap) ----
+        if self._tracked_entity_ids:
+            already_keys = {(e.role, e.entity_id) for e in perceived}
+            for tid in self._tracked_entity_ids:
+                if tid == self.BALL_ENTITY_ID:
+                    continue  # ball special-cased above
+                # Look up tid in BOTH teams (LLM didn't specify team)
+                for tk, role_label, owner_team_idx in (
+                    (team_key, "teammate", team_idx),
+                    (opp_key, "opponent", opp_team_idx),
+                ):
+                    arr = god_view.get(tk)
+                    if arr is None or tid >= len(arr):
+                        continue
+                    if (role_label, tid) in already_keys:
+                        continue
+                    pos = arr[tid]
+                    vel = god_view[f"{tk}_direction"][tid]
+                    forced = EntityView(
+                        entity_id=tid,
+                        role=role_label,
+                        position=Vec2(float(pos[0]), float(pos[1])),
+                        velocity=Vec2(float(vel[0]), float(vel[1])),
+                        distance=self_pos.distance_to(Vec2(float(pos[0]), float(pos[1]))),
+                        in_current_fov=False,  # tracked, not actually seen this tick
+                        age_ticks=0,
+                        has_ball=(
+                            int(god_view["ball_owned_team"]) == owner_team_idx
+                            and int(god_view["ball_owned_player"]) == tid
+                        ),
+                    )
+                    perceived.append(forced)
+                    already_keys.add((role_label, tid))
 
         # ---- assemble observation ---------------------------------------
         score = god_view.get("score", [0, 0])

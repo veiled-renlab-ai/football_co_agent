@@ -194,6 +194,17 @@ class FootballEnvAdapter:
         self._last_skill_name = name
         self._last_skill_status = status
 
+    def track_entity(self, entity_id: int) -> None:
+        """Forward Track skill's perception side-effect to the EgocentricFilter."""
+        if self._filter is None:
+            raise RuntimeError("Call reset() first.")
+        self._filter.track_entity(entity_id)
+
+    def untrack_entity(self, entity_id: int) -> None:
+        if self._filter is None:
+            raise RuntimeError("Call reset() first.")
+        self._filter.untrack_entity(entity_id)
+
     # ---- internals ---------------------------------------------------
 
     def _step_env(self, action: int) -> None:

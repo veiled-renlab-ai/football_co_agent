@@ -23,7 +23,7 @@ from .agent import LLMPlayer
 from .env import FootballEnvAdapter
 from .motor import MotorController, make_controller
 from .perception import Observation
-from .skills import DribbleToward, HoldPosition, MoveTo, Skill
+from .skills import DribbleToward, HoldPosition, MoveTo, Skill, Track
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +187,14 @@ class AsyncRunner:
         }
 
     def _swap_in_skill(self, skill: Skill, llm_dt: float, obs_tick: int) -> None:
+        # Track is a perception-layer side-effect, not a motor action.
+        # Apply it directly to the EgocentricFilter so subsequent
+        # observations include the tracked entity.
+        if isinstance(skill, Track):
+            try:
+                self.env.track_entity(skill.entity_id)
+            except Exception as e:
+                logger.warning("track_entity failed: %s", e)
         self._current_controller = make_controller(
             skill, team_side=self.env.team_side
         )
