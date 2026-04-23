@@ -157,17 +157,19 @@ class MoveToController(MotorController):
     Urgency mapping:
       - sprint: press SPRINT once at tick 1, then send direction every tick
       - jog:    send direction every tick (gfootball base speed, no SPRINT)
-      - walk:   throttled cycle — direction → release → idle → idle → repeat
-                (~25% jog speed, with momentum decay between pushes; gives
-                a "drifting while thinking" feel during LLM gaps)
+      - walk:   throttled cycle — direction → release → idle×4 → repeat
+                (~17% jog speed; brief push, then full momentum-decay pause
+                before next push; gives a deliberate "step, pause, step,
+                pause" walking feel during LLM thinking gaps)
 
     On arrival: stay 'in_progress' with IDLE so sticky direction carries
     the player past the target naturally. Real players don't slam-stop when
     they reach a position — they keep moving until told otherwise.
     """
 
-    # Walk cycle: 4 ticks = 1 push + 1 release + 2 idle. ~25% jog speed.
-    _WALK_CYCLE_LEN = 4
+    # Walk cycle: 6 ticks = 1 push + 1 release + 4 idle. ~17% jog speed.
+    # Tune larger to go slower; smaller to go faster.
+    _WALK_CYCLE_LEN = 6
 
     def step(self, obs: dict) -> tuple[int, SkillStatus]:
         self.tick_count += 1
@@ -207,7 +209,7 @@ class DribbleTowardController(MotorController):
     direction without losing the dribble stance.
     """
 
-    _WALK_CYCLE_LEN = 4
+    _WALK_CYCLE_LEN = 6
 
     def step(self, obs: dict) -> tuple[int, SkillStatus]:
         self.tick_count += 1
