@@ -153,7 +153,12 @@ class MultiAgentRunner:
                 agent.player_id, e,
             )
             fb_skill = HoldPosition()
-        agent.install_skill(fb_skill)
+        # Pass tick + raw_obs so Call (if ever in fallback) can post to bus.
+        # Fallback policy doesn't currently produce Call, but pass anyway for
+        # consistency — and so future fallback variants don't silently break.
+        agent.install_skill(
+            fb_skill, tick=self.env.tick, raw_obs=self.env.raw_obs,
+        )
 
     # ---- main loop ---------------------------------------------------
 
@@ -193,7 +198,12 @@ class MultiAgentRunner:
                     if item is None:
                         continue
                     skill, llm_dt, obs_tick = item
-                    a.install_skill(skill)
+                    # Pass tick + raw_obs so Call skills can post to TeamMessageBus
+                    # (PlayerAgent.install_skill needs them to build a Message;
+                    # without them, Call silently no-ops with a logged warning).
+                    a.install_skill(
+                        skill, tick=self.env.tick, raw_obs=self.env.raw_obs,
+                    )
                     self._decisions_completed += 1
                     log_entry = {
                         "decision": self._decisions_completed,

@@ -13,6 +13,7 @@ is in natural football language. The tool call is invisible to its 'soul'.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 from .perception import Observation, Vec2
 
@@ -20,6 +21,21 @@ from .perception import Observation, Vec2
 # ---------------------------------------------------------------------------
 # Persona — identity for one player
 # ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class TeamProfile:
+    """Optional team-style identity that can be attached to a PlayerPersona.
+
+    Carries the team's TACTICAL TENDENCY (~1-2 sentences) — gets injected
+    into the system prompt as a 'we play this style' character trait, so the
+    LLM thinks of it as part of who it is, not as an external rule.
+
+    Future: replaced or augmented when real player profiles are injected.
+    """
+    name: str           # "蓝队"
+    character: str      # 1-2 sentence Chinese description, e.g.:
+                        # "传控渗透为主，阵地战擅长。中场拿球后求精确出球，不求快。"
+
 
 @dataclass(frozen=True)
 class PlayerPersona:
@@ -37,6 +53,9 @@ class PlayerPersona:
     position: str        # "中场" / "中锋" / "中后卫" ...
     play_style: str      # 1-2 sentences, voice + tactical preference
     background: str      # 1-2 sentences, career history
+    team_profile: Optional[TeamProfile] = None  # optional team-style trait
+                                                # (Phase 5c). None = no team
+                                                # section in system prompt.
 
 
 DEFAULT_PERSONA = PlayerPersona(
@@ -69,6 +88,15 @@ def _skill_metadata_section() -> str:
 
 
 def build_system_prompt(persona: PlayerPersona) -> str:
+    if persona.team_profile is not None:
+        team_section = (
+            f"\n## 我们球队（{persona.team_profile.name}）的风格\n"
+            f"\n{persona.team_profile.character}\n"
+            f"\n我会按这个团队风格去思考和决策 —— 但具体怎么执行还是看场上情况和我的判断。\n"
+        )
+    else:
+        team_section = ""
+
     return f"""# 我是{persona.name}
 
 我是 {persona.name}，{persona.age} 岁，{persona.nationality}人，{persona.team}的{persona.position}，球衣 {persona.jersey_number} 号。
@@ -76,7 +104,7 @@ def build_system_prompt(persona: PlayerPersona) -> str:
 {persona.background}
 
 我的球风是 —— {persona.play_style}
-
+{team_section}
 ## 现在
 
 我正在球场上踢这场比赛。和队友们协作、和对手对抗，目标是赢下这场。
@@ -270,6 +298,23 @@ def render_observation(obs: Observation, persona: PlayerPersona) -> str:
             "**你视野里没有任何队友**（场上目前只有你单兵推进，"
             "传球/呼应 这类需要队友的动作没有意义）。"
         )
+
+    # Heard calls — incoming Call messages from teammates (Phase 5c).
+    # Absence of section IS the signal (no "no calls" line needed).
+    if obs.heard_calls:
+        lines.append("")
+        lines.append(f"你听到队友的喊话（{len(obs.heard_calls)} 条）:")
+        for call in obs.heard_calls:
+            # 50 ticks per game second (matches ENV_TICKS_PER_GAME_SECOND in perception.py)
+            age_sec = call.age_ticks / 50.0
+            if age_sec < 0.3:
+                age_str = "刚刚"
+            else:
+                age_str = f"{age_sec:.1f} 秒前"
+            sender_zone = _describe_position(call.sender_position)
+            lines.append(
+                f"  • {call.sender_jersey} 号（在{sender_zone}，{age_str}）: \"{call.message}\""
+            )
 
     # Opponents
     opponents = obs.opponents()

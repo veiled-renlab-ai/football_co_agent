@@ -16,7 +16,21 @@ user-approved.
 """
 from __future__ import annotations
 
-from .prompts import PlayerPersona
+from .prompts import PlayerPersona, TeamProfile
+
+
+# ---------------------------------------------------------------------------
+# Team-style profile (Phase 5c) — attached to each persona below as a
+# CHARACTER TRAIT. Replaces / augments later when real player profiles ship.
+# ---------------------------------------------------------------------------
+
+BLUE_TEAM_PROFILE = TeamProfile(
+    name="蓝队",
+    character=(
+        "传控渗透型球队，阵地战擅长。中场拿球后求精确出球、不求快。"
+        "防守靠整体压缩空间，不靠单兵抢断。"
+    ),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +57,7 @@ WANG_HAO_RM = PlayerPersona(
         "从青训踢出来的边路快马，跑动覆盖大，是球队右路的发动机。"
         "本场主打边路推进 + 内切。"
     ),
+    team_profile=BLUE_TEAM_PROFILE,
 )
 
 
@@ -61,6 +76,7 @@ CHEN_YU_CF = PlayerPersona(
         "蓝队的进攻支点，主力 9 号。习惯做球给队友也习惯独自终结。"
         "对阵脚下技术好的对手时会主动回撤接应。"
     ),
+    team_profile=BLUE_TEAM_PROFILE,
 )
 
 
@@ -79,6 +95,7 @@ ZHOU_JUN_LB = PlayerPersona(
         "防守出身但技术不糙，球队左路攻防的双向支柱。"
         "防守是本职，但形势好就主动套边参与进攻。"
     ),
+    team_profile=BLUE_TEAM_PROFILE,
 )
 
 
@@ -97,6 +114,7 @@ GAO_LEI_CB = PlayerPersona(
         "蓝队后防核心和精神领袖，关键时刻能扛事。"
         "防守第一，但也会在死球进攻时插上抢点。"
     ),
+    team_profile=BLUE_TEAM_PROFILE,
 )
 
 

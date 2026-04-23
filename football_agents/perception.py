@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Literal, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .message_bus import HeardCall, TeamMessageBus
 
 # ---------------------------------------------------------------------------
 # Field constants (gfootball coordinate system)
@@ -107,6 +110,10 @@ class Observation:
     recent_events: list[RecentEvent] = field(default_factory=list)
     last_skill: Optional[str] = None
     last_skill_status: Optional[Literal["in_progress", "completed", "failed"]] = None
+    # Calls heard from teammates this tick (Phase 5c). Populated by
+    # EgocentricFilter when constructed with a TeamMessageBus; empty list
+    # otherwise. Order: as posted to the bus (oldest first).
+    heard_calls: list["HeardCall"] = field(default_factory=list)
 
     # ------------------------------------------------------------------
     # Convenience accessors — used by the LLM client when formatting
@@ -158,7 +165,13 @@ class EgocentricFilter:
 
     BALL_ENTITY_ID = 99
 
-    def __init__(self, player_id: int, team: Team, role: Role) -> None:
+    def __init__(
+        self,
+        player_id: int,
+        team: Team,
+        role: Role,
+        bus: Optional["TeamMessageBus"] = None,
+    ) -> None:
         self.player_id = player_id
         self.team = team
         self.role = role
@@ -174,6 +187,11 @@ class EgocentricFilter:
         # the flag clears. Lets the LLM "glance over the shoulder" without
         # a visible body-turn jerk in the render.
         self._scan_behind_pending: bool = False
+        # Optional per-team message bus for the Call skill (Phase 5c).
+        # When None, Observation.heard_calls is always an empty list and
+        # no bus reads happen — preserves backward compatibility for
+        # single-agent demos that don't wire up communication.
+        self._bus = bus
 
     # ----- public side-effect API used when LLM picks Track skill -----
 
@@ -331,12 +349,27 @@ class EgocentricFilter:
         if self._scan_behind_pending:
             self._scan_behind_pending = False
         score = god_view.get("score", [0, 0])
+
+        # Pull any Call messages this player can hear from the team bus
+        # (Phase 5c). Bus is optional — single-agent demos leave it None
+        # and get an empty heard_calls list.
+        heard: list = []
+        if self._bus is not None:
+            channel = "left" if self.team == "team_a" else "right"
+            heard = self._bus.read_for(
+                team=channel,
+                listener_id=self.player_id,
+                listener_position=self_pos,
+                current_tick=tick,
+            )
+
         return Observation(
             tick=tick,
             match_clock=self._format_clock(tick),
             score=(int(score[0]), int(score[1])),
             self_state=self_state,
             perceived_entities=perceived,
+            heard_calls=heard,
         )
 
     # ------------------------------------------------------------------

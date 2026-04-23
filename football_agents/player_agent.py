@@ -37,10 +37,11 @@ from typing import Optional
 
 from .agent import LLMPlayer
 from .llm_client import LLMClient
+from .message_bus import Message, TeamMessageBus
 from .motor import MotorController, SkillStatus, make_controller
-from .perception import EgocentricFilter, Observation, Role, Team
+from .perception import EgocentricFilter, Observation, Role, Team, Vec2
 from .prompts import PlayerPersona
-from .skills import ScanBehind, Skill, Track
+from .skills import Call, ScanBehind, Skill, Track
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,7 @@ class PlayerAgent:
         role: Role,
         persona: PlayerPersona,
         llm_client: LLMClient,
+        bus: Optional[TeamMessageBus] = None,
     ) -> None:
         # Identity (immutable for the agent's lifetime)
         self.slot = slot                # gfootball action-list index (0..N-1)
@@ -95,6 +97,10 @@ class PlayerAgent:
         self.team_side = team_side      # "left" | "right"
         self.role = role
         self.persona = persona
+
+        # Optional shared per-team message bus (Phase 5c, Call skill).
+        # None = single-agent / no-comms mode (Call silently no-ops).
+        self.bus = bus
 
         # Brain — per-player, owns its own 3-tier memory.
         # LLMClient is shared across all agents (thread-safe HTTP client).
@@ -112,6 +118,7 @@ class PlayerAgent:
             player_id=player_id,
             team=team_label,
             role=role,
+            bus=bus,
         )
 
         # Motor state — per-player, set by install_skill().
@@ -141,7 +148,13 @@ class PlayerAgent:
         obs.last_skill_status = self.last_skill_status
         return obs
 
-    def install_skill(self, skill: Skill) -> None:
+    def install_skill(
+        self,
+        skill: Skill,
+        *,
+        tick: Optional[int] = None,
+        raw_obs: Optional[dict] = None,
+    ) -> None:
         """Replace current motor controller with one for the given skill.
 
         Special-cases routed to perception layer (no body motion):
@@ -152,6 +165,25 @@ class PlayerAgent:
         visible jerks in the render. Now they're pure perception flips: the
         body keeps doing whatever sticky state it had, only the brain's view
         of the world expands for that one decision tick.
+
+        Communication skill routed to TeamMessageBus (Phase 5c):
+          - Call: post a Message to self.bus on behalf of this agent's team.
+            Requires BOTH `tick` AND `raw_obs` to be supplied (we need the
+            env tick for tick_posted and raw_obs for sender_position).
+            If self.bus is None, OR tick is None, OR raw_obs is None, the
+            Call silently no-ops (logs a warning) and only the motor side
+            of the skill runs (which is IdleController — no-op anyway).
+
+        Args:
+            skill: the chosen Skill instance.
+            tick: env tick at install time. Required for Call to actually
+                post to the bus (used as Message.tick_posted). Defaults to
+                None for backward compatibility with callers (e.g., older
+                single-agent demos) that don't track ticks.
+            raw_obs: god-view dict at install time. Required for Call to
+                actually post to the bus (used to read this agent's
+                position from raw_obs[team_key][player_id]). Defaults to
+                None for backward compatibility.
         """
         if isinstance(skill, Track):
             try:
@@ -169,11 +201,60 @@ class PlayerAgent:
                     "agent[pid=%d] scan_behind() failed: %s",
                     self.player_id, e,
                 )
+        elif isinstance(skill, Call):
+            self._post_call(skill, tick=tick, raw_obs=raw_obs)
         self.current_controller = make_controller(
             skill, team_side=self.team_side, player_id=self.player_id,
         )
         self.last_skill_name = type(skill).__name__
         self.last_skill_status = "in_progress"
+
+    def _post_call(
+        self,
+        skill: "Call",
+        *,
+        tick: Optional[int],
+        raw_obs: Optional[dict],
+    ) -> None:
+        """Post a Call's content to the team message bus. Best-effort:
+        any missing dependency or runtime error logs a warning and is
+        silently swallowed so the LLM's decision stream isn't disrupted.
+        """
+        if self.bus is None:
+            logger.warning(
+                "agent[pid=%d] Call skill chosen but no TeamMessageBus "
+                "wired (single-agent / no-comms mode); message dropped: %r",
+                self.player_id, skill.message,
+            )
+            return
+        if tick is None or raw_obs is None:
+            logger.warning(
+                "agent[pid=%d] Call skill chosen but install_skill called "
+                "without tick/raw_obs (tick=%s raw_obs=%s); message dropped: %r. "
+                "MultiAgentRunner must pass tick=self.env.tick and "
+                "raw_obs=self.env.raw_obs into install_skill for Call to work.",
+                self.player_id, tick, "set" if raw_obs is not None else None,
+                skill.message,
+            )
+            return
+        try:
+            team_key = "left_team" if self.team_side == "left" else "right_team"
+            pos_arr = raw_obs[team_key][self.player_id]
+            sender_position = Vec2(float(pos_arr[0]), float(pos_arr[1]))
+            msg = Message(
+                sender_player_id=self.player_id,
+                sender_jersey=self.persona.jersey_number,
+                sender_position=sender_position,
+                message=skill.message,
+                audience=skill.audience,
+                tick_posted=tick,
+            )
+            self.bus.post(self.team_side, msg)
+        except Exception as e:
+            logger.warning(
+                "agent[pid=%d] Call post failed (%s); message dropped: %r",
+                self.player_id, e, skill.message,
+            )
 
     def step_motor(self, raw_obs: dict) -> tuple[int, SkillStatus]:
         """Advance current motor controller by one env tick. Main thread.

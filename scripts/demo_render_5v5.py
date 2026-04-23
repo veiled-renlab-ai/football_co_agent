@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from football_agents.env import FootballEnvAdapter
 from football_agents.llm_client import LLMClient
+from football_agents.message_bus import TeamMessageBus
 from football_agents.multi_agent_runner import MultiAgentRunner
 from football_agents.perception import EgocentricFilter
 from football_agents.personas import TEAM_BLUE_5V5
@@ -65,7 +66,17 @@ def main() -> None:
     )
     env.reset()
 
-    # Build 4 PlayerAgents using the verified slot→player_id map
+    # Phase 5c: shared TeamMessageBus — Call skill posts here, teammates'
+    # EgocentricFilter reads from here on each filter() call. Per-team
+    # partitioned (left vs right channels) so the wall holds even if both
+    # teams are LLM-driven later (Phase 5d).
+    bus = TeamMessageBus()
+    print(f"TeamMessageBus created (per-team partitioned, "
+          f"{TeamMessageBus.MESSAGE_LIFETIME_TICKS}-tick message lifetime)\n")
+
+    # Build 4 PlayerAgents using the verified slot→player_id map.
+    # Each agent gets the shared bus → can post Calls (visible to teammates)
+    # and read teammates' Calls in their own observations.
     raw = env.raw_obs
     roles_arr = raw["left_team_roles"]
     agents = []
@@ -82,11 +93,13 @@ def main() -> None:
                 role=role_name,
                 persona=persona,
                 llm_client=client,
+                bus=bus,
             )
         )
+        team_tag = f" [{persona.team_profile.name}]" if persona.team_profile else ""
         print(
             f"slot {slot} → pid {player_id} ({role_name}) → {persona.name} "
-            f"(#{persona.jersey_number} {persona.position})"
+            f"(#{persona.jersey_number} {persona.position}){team_tag}"
         )
     print()
 
