@@ -187,8 +187,14 @@ class MultiAgentRunner:
         last_tick_wall = time.monotonic()
         # Initial last-push-tick; vary by agent so refresh cadence stays staggered
         # even after the startup jitter.
+        # KEYED BY SLOT (not player_id) — player_id is per-team-relative
+        # (left team has pids 0-4, right team also has pids 0-4), so keying
+        # by player_id would let blue and red collide on the same key. The
+        # team that iterates first wins every push and the other team's obs
+        # queue never refreshes → only first decision ever fires.
+        # slot is globally unique (0..n_total-1).
         last_obs_push_tick: dict[int, int] = {
-            a.player_id: -((i * self.obs_refresh_every_ticks) // max(1, len(self.agents)))
+            a.slot: -((i * self.obs_refresh_every_ticks) // max(1, len(self.agents)))
             for i, a in enumerate(self.agents)
         }
 
@@ -247,10 +253,10 @@ class MultiAgentRunner:
 
                 # ---- 5. Periodically push fresh obs to each agent's worker ----
                 for a in self.agents:
-                    if self.env.tick - last_obs_push_tick[a.player_id] >= self.obs_refresh_every_ticks:
+                    if self.env.tick - last_obs_push_tick[a.slot] >= self.obs_refresh_every_ticks:
                         obs = a.perceive(self.env.raw_obs, self.env.tick)
                         a.push_observation(obs)
-                        last_obs_push_tick[a.player_id] = self.env.tick
+                        last_obs_push_tick[a.slot] = self.env.tick
 
                 # ---- 6. Cap wall-clock tick rate for game=wall alignment ----
                 # With default pps=2 + 50 fps wall cap: 50*2*0.01 = 1.0 game
