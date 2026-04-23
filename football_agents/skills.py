@@ -265,39 +265,32 @@ def _resolved_type_to_schema(t: Any) -> dict[str, Any]:
 def skill_to_tool_schema(skill_cls: type[Skill]) -> dict[str, Any]:
     """Convert a Skill class into an OpenAI-style tool definition.
 
-    Returns a dict shaped like:
-        {
-          "type": "function",
-          "function": {
-            "name": "<tool_name>",
-            "description": "<description>",
-            "parameters": { JSON Schema },
-          }
-        }
+    Uses `strict: True` + all-required to engage constrained decoding on
+    providers that support it (OpenAI, GLM-4.7 on 火山方舟 Coding Plan).
+    With strict mode the model is physically constrained to emit args
+    matching the schema exactly — no more truncated `{` returns.
 
-    Compatible with 火山方舟, MiniMax, OpenAI, DeepSeek, etc.
+    Trade-off: with strict, ALL parameters must be required (OpenAI rule).
+    Skills with optional fields like `urgency` now force the LLM to specify
+    them on every call. Slightly more verbose, but eliminates malformed args.
     """
-    # Resolve string annotations (from `from __future__ import annotations`)
-    # to real types, including type aliases like `PassType = Literal[...]`.
     type_hints = get_type_hints(skill_cls)
 
     properties: dict[str, Any] = {}
-    required: list[str] = []
     for f in fields(skill_cls):
         resolved = type_hints.get(f.name, str)
         properties[f.name] = _resolved_type_to_schema(resolved)
-        if f.default is MISSING and f.default_factory is MISSING:  # type: ignore[misc]
-            required.append(f.name)
 
     return {
         "type": "function",
         "function": {
             "name": skill_cls.tool_name,
             "description": skill_cls.description,
+            "strict": True,
             "parameters": {
                 "type": "object",
                 "properties": properties,
-                "required": required,
+                "required": list(properties.keys()),  # strict requires all
                 "additionalProperties": False,
             },
         },

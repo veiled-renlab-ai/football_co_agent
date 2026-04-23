@@ -285,6 +285,102 @@ class IdleController(MotorController):
 
 
 # ---------------------------------------------------------------------------
+# Defensive controllers
+# ---------------------------------------------------------------------------
+
+class PressController(MotorController):
+    """Sprint at a specific opponent to close down space and force a mistake.
+
+    Pure mechanics: identify opponent's current position, sprint toward them.
+    Stays in_progress until LLM picks something else (real defenders keep
+    pressing until told otherwise).
+    """
+
+    def step(self, obs: dict) -> tuple[int, SkillStatus]:
+        self.tick_count += 1
+        skill: Press = self.skill  # type: ignore[assignment]
+        opp_key = "right_team" if self.team_side == "left" else "left_team"
+        try:
+            opp_pos = obs[opp_key][skill.opponent_id]
+        except (IndexError, KeyError):
+            return A.IDLE, "failed"
+        self_pos, _ = self._self_pos_vel(obs)
+        dx = float(opp_pos[0]) - float(self_pos[0])
+        dy = float(opp_pos[1]) - float(self_pos[1])
+        if self.tick_count == 1:
+            return A.SPRINT, "in_progress"
+        if math.hypot(dx, dy) < self.EPSILON:
+            return A.IDLE, "in_progress"  # right next to opponent
+        return vector_to_action(dx, dy), "in_progress"
+
+
+class MarkController(MotorController):
+    """Stay goal-side of a specific opponent — between them and our own goal.
+
+    Defensive shadowing. Move to a point on the line from opponent to our goal,
+    slightly closer to our goal than the opponent.
+    """
+
+    SHADOW_OFFSET = 0.10  # how far goal-side of the opponent we sit
+
+    def step(self, obs: dict) -> tuple[int, SkillStatus]:
+        self.tick_count += 1
+        skill: Mark = self.skill  # type: ignore[assignment]
+        opp_key = "right_team" if self.team_side == "left" else "left_team"
+        try:
+            opp_pos = obs[opp_key][skill.opponent_id]
+        except (IndexError, KeyError):
+            return A.IDLE, "failed"
+        own_goal_x = -1.0 if self.team_side == "left" else 1.0
+        # Sit SHADOW_OFFSET on the our-goal side of the opponent
+        target_x = float(opp_pos[0]) + (
+            -self.SHADOW_OFFSET if self.team_side == "left" else +self.SHADOW_OFFSET
+        )
+        target_y = float(opp_pos[1])
+        # Don't go past our own goal line
+        if self.team_side == "left":
+            target_x = max(target_x, own_goal_x + 0.05)
+        else:
+            target_x = min(target_x, own_goal_x - 0.05)
+        self_pos, _ = self._self_pos_vel(obs)
+        dx = target_x - float(self_pos[0])
+        dy = target_y - float(self_pos[1])
+        if math.hypot(dx, dy) < self.EPSILON:
+            return A.IDLE, "in_progress"
+        return vector_to_action(dx, dy), "in_progress"
+
+
+class TackleController(MotorController):
+    """Slide-tackle attempt. One-shot: trigger SLIDING and we're done."""
+
+    def step(self, obs: dict) -> tuple[int, SkillStatus]:
+        self.tick_count += 1
+        if self.tick_count == 1:
+            return A.SLIDING, "completed"
+        return A.IDLE, "completed"
+
+
+# ---------------------------------------------------------------------------
+# Active perception controllers
+# ---------------------------------------------------------------------------
+
+class ScanBehindController(MotorController):
+    """Quick over-the-shoulder check — turn around briefly.
+
+    Mechanics: send the opposite of player's current direction for one tick
+    (gfootball will face that way for the next observation, expanding FOV
+    behind). Then complete.
+    """
+
+    def step(self, obs: dict) -> tuple[int, SkillStatus]:
+        self.tick_count += 1
+        if self.tick_count == 1:
+            # Turn toward our own goal direction (= behind, when attacking)
+            return (A.LEFT if self.team_side == "left" else A.RIGHT, "in_progress")
+        return A.IDLE, "completed"
+
+
+# ---------------------------------------------------------------------------
 # Skill -> Controller dispatch
 # ---------------------------------------------------------------------------
 
@@ -294,12 +390,12 @@ SKILL_TO_CONTROLLER: dict[type[Skill], type[MotorController]] = {
     HoldPosition: HoldPositionController,
     PassTo: PassToController,
     Shoot: ShootController,
-    # TODO Phase 3+: real implementations of these
+    Press: PressController,
+    Mark: MarkController,
+    Tackle: TackleController,
+    ScanBehind: ScanBehindController,
+    # Still TODO (no clear gfootball action mapping):
     ReceiveBall: IdleController,
-    Mark: IdleController,
-    Press: IdleController,
-    Tackle: IdleController,
-    ScanBehind: IdleController,
     Track: IdleController,
     Call: IdleController,
 }
