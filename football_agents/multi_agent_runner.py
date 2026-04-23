@@ -46,25 +46,76 @@ FallbackPolicy = Callable[[Observation], Skill]
 def body_rest_state_fallback(obs: Observation) -> Skill:
     """The motor cortex autopilot — what the body does between LLM decisions.
 
-    Identical to the v0.walk-fallback policy from async_runner.py. Lifted
-    here so MultiAgentRunner doesn't depend on AsyncRunner's module.
+    This fallback carries basic game intelligence: when the LLM hasn't
+    decided yet, the body still responds to the most urgent situations.
+    Unlike a real footballer who always has intent, this covers the 2-4s
+    gaps while the LLM is thinking.
 
-    All branches use `walk` urgency (~17% jog speed via direction throttling
-    in motor.py) so the body drifts deliberately during the 2-4s LLM gap.
+    Priority order:
+      1. OPPONENT has ball + is moving toward/away from our goal → SPRINT
+         toward the carrier to apply pressure (chase reflex).
+      2. BALL is loose (no carrier) → SPRINT toward the ball to contest it.
+      3. TEAMMATE has ball + is moving toward opponent goal → maintain
+         formation (don't cluster); slow walk toward appropriate formation
+         position.
+      4. DEFAULT → HoldPosition (stand and wait for next LLM decision).
 
-      • has_ball   → walk-dribble toward midfield on current y-lane
-      • sees ball  → walk 40% of the way toward the ball
-      • no ball    → HoldPosition: stop and look around
+    All SPRINT urgency is used intentionally: fallback only fires when the
+    LLM is silent, so urgency is the body's best guess at engagement need.
     """
-    if obs.self_state.has_ball:
-        self_y = float(obs.self_state.position.y)
-        return DribbleToward(target_x=0.6, target_y=self_y, urgency="walk")
+    import math
+
     ball = obs.ball()
-    if ball is not None:
-        self_pos = obs.self_state.position
-        target_x = float(self_pos.x) + 0.4 * (float(ball.position.x) - float(self_pos.x))
-        target_y = float(self_pos.y) + 0.4 * (float(ball.position.y) - float(self_pos.y))
-        return MoveTo(target_x=target_x, target_y=target_y, urgency="walk")
+    self_pos = obs.self_state.position
+
+    opponent_with_ball: tuple[EntityView, float] | None = None
+    for e in obs.opponents():
+        if e.has_ball:
+            opponent_with_ball = (e, e.distance)
+            break
+
+    if opponent_with_ball is not None:
+        opp, dist = opponent_with_ball
+        if opp.velocity is not None:
+            speed = math.hypot(opp.velocity.x, opp.velocity.y)
+            if speed > 0.001:
+                return MoveTo(
+                    target_x=float(opp.position.x),
+                    target_y=float(opp.position.y),
+                    urgency="sprint",
+                )
+        if dist > 0.05:
+            return MoveTo(
+                target_x=float(opp.position.x),
+                target_y=float(opp.position.y),
+                urgency="sprint",
+            )
+
+    if ball is not None and not any(e.has_ball for e in obs.perceived_entities):
+        ball_speed = 0.0
+        if ball.velocity is not None:
+            ball_speed = math.hypot(ball.velocity.x, ball.velocity.y)
+        if ball_speed > 0.0005 or ball.distance > 0.08:
+            return MoveTo(
+                target_x=float(ball.position.x),
+                target_y=float(ball.position.y),
+                urgency="sprint",
+            )
+
+    teammate_with_ball: EntityView | None = None
+    for e in obs.teammates():
+        if e.has_ball:
+            teammate_with_ball = e
+            break
+
+    if teammate_with_ball is not None:
+        if teammate_with_ball.velocity is not None:
+            speed = math.hypot(
+                teammate_with_ball.velocity.x, teammate_with_ball.velocity.y
+            )
+            if speed > 0.001:
+                return HoldPosition()
+
     return HoldPosition()
 
 
