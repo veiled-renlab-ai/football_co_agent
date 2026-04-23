@@ -61,7 +61,7 @@ class LLMClient:
             return cls(
                 api_key=os.getenv("VOLCENGINE_API_KEY", ""),
                 base_url=os.getenv("VOLCENGINE_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"),
-                model=os.getenv("VOLCENGINE_MODEL", "doubao-seed-1.6-250615"),
+                model=os.getenv("VOLCENGINE_MODEL", "doubao-seed-2-0-lite-260215"),
             )
         if provider == "minimax":
             return cls(
