@@ -273,6 +273,96 @@ CATEGORY_TOOL_NAMES: dict[str, str] = {
 }
 
 
+def make_invoke_skill_tool(valid_skill_names: list[str]) -> dict[str, Any]:
+    """The single meta-tool exposed to the LLM (Anthropic Skills style).
+
+    Skill metadata (name + description + params) lives in the system prompt
+    (always-loaded Level 1). The LLM picks one by name via this single tool;
+    we validate args at our side. Per-turn `valid_skill_names` lets us
+    enforce mechanical possibility (no shoot without ball) at the schema layer.
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": "invoke_skill",
+            "description": (
+                "执行一个动作。skill_name 必须是 system prompt 里 'Available Skills' "
+                "列表中某一个 name；args 是该 skill 的参数字典（键名和类型见 metadata 描述）。"
+                "如果 skill 不接受参数，args 传 {}。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill_name": {
+                        "type": "string",
+                        "enum": valid_skill_names,
+                        "description": "要执行的动作的 name (snake_case)。",
+                    },
+                    "args": {
+                        "type": "object",
+                        "description": "该动作的参数字典；键名按 metadata 描述。无参数时传 {}。",
+                    },
+                },
+                "required": ["skill_name", "args"],
+            },
+        },
+    }
+
+
+def skill_metadata_block(skills: list[type[Skill]] | None = None) -> str:
+    """Generate the 'Available Skills' section for the system prompt.
+
+    Mirrors Anthropic Skills Level 1 (always loaded): name + description +
+    one-line param hint per skill. ~80-150 tokens per skill, total ~1.5k
+    for all 12 skills. Sits in the system prompt so it's loaded once per
+    LLM call (no per-tool schema overhead).
+
+    Output is plain Chinese markdown.
+    """
+    if skills is None:
+        skills = list(ALL_SKILLS)
+
+    lines: list[str] = ["# 你能用的动作 (Available Skills)\n"]
+    for s in skills:
+        cat = SKILL_CATEGORY.get(s, "?")
+        lines.append(f"## `{s.tool_name}`  ({cat})")
+        lines.append(f"{s.description}")
+        # Param hints
+        try:
+            type_hints = get_type_hints(s)
+        except Exception:
+            type_hints = {}
+        param_lines: list[str] = []
+        for f in fields(s):
+            resolved = type_hints.get(f.name, str)
+            origin = get_origin(resolved)
+            type_args = get_args(resolved)
+            if origin is Literal:
+                kind = " | ".join(repr(a) for a in type_args)
+            elif resolved is float:
+                kind = "float"
+            elif resolved is int:
+                kind = "int"
+            elif resolved is str:
+                kind = "str"
+            elif resolved is bool:
+                kind = "bool"
+            else:
+                name_attr = getattr(resolved, "__name__", None)
+                kind = name_attr if name_attr else str(resolved)
+            default_part = ""
+            if f.default is not MISSING:
+                default_part = f"（默认 {f.default!r}）"
+            param_lines.append(f"  - `{f.name}`: {kind}{default_part}")
+        if param_lines:
+            lines.append("参数:")
+            lines.extend(param_lines)
+        else:
+            lines.append("（无参数）")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def layer_1_category_tools() -> list[dict[str, Any]]:
     """Return the 5 category meta-tools — no params, one-line descriptions.
 

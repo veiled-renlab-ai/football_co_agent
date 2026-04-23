@@ -61,6 +61,13 @@ DEFAULT_PERSONA = PlayerPersona(
 # System prompt — first-person role-play in Chinese
 # ---------------------------------------------------------------------------
 
+def _skill_metadata_section() -> str:
+    """Lazy import to avoid circular dependency; returns the Anthropic Skills
+    Level-1 metadata block (always-loaded skill name + description + params)."""
+    from .skills import skill_metadata_block
+    return skill_metadata_block()
+
+
 def build_system_prompt(persona: PlayerPersona) -> str:
     return f"""你是 {persona.name}，{persona.age} 岁，{persona.nationality}人，{persona.team}的{persona.position}，球衣 {persona.jersey_number} 号。
 
@@ -96,9 +103,13 @@ def build_system_prompt(persona: PlayerPersona) -> str:
 
 【输出】
 1. 用一两句话第一人称说你的判断（像赛后采访球员那样的口吻）
-2. 然后调用一个工具
+2. 然后调用 `invoke_skill` 工具，传入 skill_name 和 args
 
 记住：你不是在玩游戏，你在踢一场真实的比赛。
+
+────────────────────────────────────────
+
+{_skill_metadata_section()}
 """
 
 

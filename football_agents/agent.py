@@ -13,10 +13,9 @@ from .llm_client import LLMClient, LLMDecision
 from .perception import Observation
 from .prompts import DEFAULT_PERSONA, PlayerPersona, build_system_prompt, render_observation
 from .skills import (
-    ALL_SKILLS, CATEGORY_TOOL_NAMES, SKILLS_BY_NAME, Call, DribbleToward,
-    HoldPosition, Mark, MoveTo, PassTo, Press, ReceiveBall, ScanBehind,
-    Shoot, Skill, Tackle, Track, layer_1_category_tools, skill_to_tool_schema,
-    skills_in_category,
+    ALL_SKILLS, SKILLS_BY_NAME, Call, DribbleToward, HoldPosition, Mark,
+    MoveTo, PassTo, Press, ReceiveBall, ScanBehind, Shoot, Skill, Tackle,
+    Track, make_invoke_skill_tool,
 )
 
 
@@ -170,121 +169,65 @@ class LLMPlayer:
             skill=None,
         )
 
-        # Per-turn dynamic tool filtering — only physically possible actions.
+        # Anthropic Skills pattern: skill metadata is in the system prompt
+        # (Level 1, always loaded). The LLM picks via a SINGLE meta-tool
+        # `invoke_skill(skill_name, args)`. We validate args at our side.
+        # Per-turn enum constrains skill_name to mechanically-valid skills only.
         valid_skill_classes = self._valid_skills_for(observation)
-        valid_set = set(valid_skill_classes)
+        valid_skill_names = [c.tool_name for c in valid_skill_classes]
+        invoke_tool = make_invoke_skill_tool(valid_skill_names)
 
-        # Stage 1 categories: only those that contain at least one valid skill
-        from .skills import SKILL_CATEGORY  # local import (avoids circular)
-        valid_categories = sorted({
-            c for s, c in SKILL_CATEGORY.items() if s in valid_set
-        })
-        layer_1_tools = [
-            t for t in layer_1_category_tools()
-            if CATEGORY_TOOL_NAMES[t["function"]["name"]] in valid_categories
-        ]
-
-        # ---- Build messages with 3-tier memory ----
         new_user_msg: dict[str, Any] = {"role": "user", "content": obs_text}
-        msgs_for_stage1 = self._build_messages(new_user_msg)
+        msgs = self._build_messages(new_user_msg)
 
         try:
-            stage1 = self.llm_client.chat_with_messages(
-                messages=msgs_for_stage1,
-                tools=layer_1_tools,
+            decision = self.llm_client.chat_with_messages(
+                messages=msgs,
+                tools=[invoke_tool],
             )
         except Exception as e:
-            log_entry.error = f"llm_stage1_failed: {e!r}"
+            log_entry.error = f"llm_call_failed: {e!r}"
             log_entry.skill = HoldPosition()
             self.history.append(log_entry)
-            logger.warning("LLM stage-1 failed for player %s: %s", self.player_id, e)
+            logger.warning("LLM call failed for player %s: %s", self.player_id, e)
             return log_entry.skill
 
-        category = CATEGORY_TOOL_NAMES.get(stage1.tool_name)
-        if category is None:
-            log_entry.error = f"unknown_category: {stage1.tool_name!r}"
-            log_entry.skill = HoldPosition()
-            self.history.append(log_entry)
-            logger.warning("Unknown category %r from stage-1", stage1.tool_name)
-            return log_entry.skill
+        # Parse: tool_args = {"skill_name": "shoot", "args": {"target_zone": ...}}
+        skill_name = decision.tool_args.get("skill_name")
+        args = decision.tool_args.get("args", {})
+        if not isinstance(args, dict):
+            args = {}
 
-        stage1_assist_msg = stage1.raw_message.model_dump(exclude_none=True)
-        stage1_tool_call_id = stage1.raw_message.tool_calls[0].id
-        stage1_tool_ack = {
-            "role": "tool",
-            "tool_call_id": stage1_tool_call_id,
-            "content": f"OK，类目已选定: {category}。请从该类下选具体动作。",
-        }
-
-        # ---- Stage 2: pick specific skill within the chosen category ----
-        cat_skills = [s for s in skills_in_category(category) if s in valid_set]
-        if not cat_skills:
-            log_entry.error = f"no_valid_skills_in_category: {category}"
-            log_entry.skill = HoldPosition()
-            self.history.append(log_entry)
-            return log_entry.skill
-
-        stage2_tools = [skill_to_tool_schema(c) for c in cat_skills]
-        # Stage 2 sees: system + memory + new_user + stage1_asst + stage1_ack
-        msgs_for_stage2 = msgs_for_stage1 + [stage1_assist_msg, stage1_tool_ack]
-
-        try:
-            stage2 = self.llm_client.chat_with_messages(
-                messages=msgs_for_stage2,
-                tools=stage2_tools,
-            )
-        except Exception as e:
-            log_entry.error = f"llm_stage2_failed: {e!r}"
-            log_entry.skill = HoldPosition()
-            self.history.append(log_entry)
-            logger.warning("LLM stage-2 failed for player %s: %s", self.player_id, e)
-            return log_entry.skill
-
-        stage2_assist_msg = stage2.raw_message.model_dump(exclude_none=True)
-        stage2_tool_call_id = stage2.raw_message.tool_calls[0].id
-        stage2_tool_ack = {
-            "role": "tool",
-            "tool_call_id": stage2_tool_call_id,
-            "content": f"动作 {stage2.tool_name} 已经派给 motor 执行。",
-        }
-
-        # Commit this turn into 3-tier memory (recent → compress → drop)
-        this_turn_msgs = [
-            new_user_msg,
-            stage1_assist_msg,
-            stage1_tool_ack,
-            stage2_assist_msg,
-            stage2_tool_ack,
-        ]
-        self._commit_turn(this_turn_msgs)
-
-        # Combine reasoning from both stages for the visible log
-        combined = []
-        if stage1.reasoning:
-            combined.append(f"[{category}] {stage1.reasoning}")
-        if stage2.reasoning:
-            combined.append(stage2.reasoning)
-        log_entry.reasoning = " // ".join(combined)
-        log_entry.tool_name = stage2.tool_name
-        log_entry.tool_args = stage2.tool_args
-
-        skill_cls = SKILLS_BY_NAME.get(stage2.tool_name)
+        skill_cls = SKILLS_BY_NAME.get(skill_name)
         if skill_cls is None:
-            log_entry.error = f"unknown_skill: {stage2.tool_name!r}"
+            log_entry.error = f"unknown_skill: {skill_name!r}"
             log_entry.skill = HoldPosition()
             self.history.append(log_entry)
-            logger.warning("Unknown skill %r from stage-2; fallback HoldPosition", stage2.tool_name)
+            logger.warning("Unknown skill %r from LLM; fallback HoldPosition", skill_name)
             return log_entry.skill
 
         try:
-            skill = skill_cls(**stage2.tool_args)
+            skill = skill_cls(**args)
         except TypeError as e:
             log_entry.error = f"bad_args: {e!r}"
             log_entry.skill = HoldPosition()
             self.history.append(log_entry)
-            logger.warning("Bad args for %s: %s", stage2.tool_name, e)
+            logger.warning("Bad args for %s: %s — fallback HoldPosition", skill_name, e)
             return log_entry.skill
 
+        # Commit to 3-tier memory: this turn = [user_msg, asst_msg, tool_ack] (3 msgs)
+        asst_msg = decision.raw_message.model_dump(exclude_none=True)
+        tool_call_id = decision.raw_message.tool_calls[0].id
+        tool_ack = {
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": f"动作 {skill_name} 已派给 motor 执行。",
+        }
+        self._commit_turn([new_user_msg, asst_msg, tool_ack])
+
+        log_entry.reasoning = decision.reasoning
+        log_entry.tool_name = skill_name
+        log_entry.tool_args = args
         log_entry.skill = skill
         self.history.append(log_entry)
         return skill
