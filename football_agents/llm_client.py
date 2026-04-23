@@ -80,22 +80,47 @@ class LLMClient:
         tools: list[dict[str, Any]],
         *,
         temperature: float = 0.4,
-        max_tokens: int = 2048,
+        max_tokens: int = 4096,
+        max_retries: int = 1,
     ) -> LLMDecision:
         """Send one chat completion with `tools` and parse the model's tool call.
 
-        Raises RuntimeError if no tool call comes back (some providers don't
-        respect tool_choice='required'; the caller should fall back).
+        On bad-JSON responses (GLM-4.7 occasionally returns truncated
+        `arguments='{'`), we retry up to `max_retries` more times with the
+        same prompt. Not a state machine — pure transport-layer resilience.
 
-        Notes:
-          - max_tokens=2048 because some thinking-capable models (e.g. GLM-4.7
-            on 火山方舟 Coding Plan) consume hidden reasoning_tokens that share
-            the output budget; with long prompts + many tools the response gets
-            truncated to '{' if the cap is too low.
-          - extra_body.thinking.type='disabled' attempts to turn off implicit
-            thinking on GLM-style providers. Harmless if the provider ignores
-            unknown extras; OpenAI / Doubao etc. just pass it through.
+        Other failure modes (no tool call, network, auth) raise immediately.
         """
+        last_err: Optional[Exception] = None
+        for attempt in range(max_retries + 1):
+            try:
+                return self._call_once(
+                    system_prompt, user_message, tools,
+                    temperature=temperature, max_tokens=max_tokens,
+                )
+            except RuntimeError as e:
+                if "non-JSON tool arguments" not in str(e):
+                    raise
+                last_err = e
+                if attempt < max_retries:
+                    logger.warning(
+                        "LLM returned bad JSON (attempt %d/%d), retrying...",
+                        attempt + 1, max_retries + 1,
+                    )
+        # Exhausted retries
+        assert last_err is not None
+        raise last_err
+
+    def _call_once(
+        self,
+        system_prompt: str,
+        user_message: str,
+        tools: list[dict[str, Any]],
+        *,
+        temperature: float,
+        max_tokens: int,
+    ) -> LLMDecision:
+        """One chat completion + parse. Used by choose_tool with retry."""
         response = self._client.chat.completions.create(
             model=self.model,
             messages=[
@@ -106,6 +131,8 @@ class LLMClient:
             tool_choice="auto",
             temperature=temperature,
             max_tokens=max_tokens,
+            # Verified working for GLM-4.7 on 火山方舟 Coding Plan
+            # (reasoning_tokens drops 125 → 0). See scripts/inspect_glm_response.py
             extra_body={"thinking": {"type": "disabled"}},
         )
         msg = response.choices[0].message
@@ -120,7 +147,6 @@ class LLMClient:
 
         tc = tcs[0]
         tool_name = tc.function.name
-        # arguments is a JSON string per OpenAI spec
         try:
             tool_args = json.loads(tc.function.arguments or "{}")
         except json.JSONDecodeError as e:
