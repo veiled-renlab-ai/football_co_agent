@@ -16,7 +16,7 @@ controllers in Phase 3+.
 from __future__ import annotations
 
 import math
-from typing import Literal
+from typing import Literal, Optional
 
 import numpy as np
 
@@ -113,29 +113,53 @@ class MotorController:
     """Base for Skill state machines.
 
     Subclasses implement `.step(obs)` returning (action_id, status). The
-    controller is owned by the env wrapper, which calls `.step()` every env
-    tick until status != 'in_progress'.
+    controller is owned by the env wrapper / multi-agent runner, which
+    calls `.step()` every env tick until status != 'in_progress'.
+
+    Multi-agent correctness:
+      Each controller is bound to a specific player at construction time
+      via `player_id`. Helper methods (`_self_pos_vel`, `_has_ball`) use
+      `self.player_id` to resolve "self" — they DO NOT read obs["active"],
+      because in multi-agent mode all controllers share one raw_obs and
+      `active` is meaningless when controlling all 11 players.
+
+      For backward compat with the single-agent path (FootballEnvAdapter
+      auto-following gfootball's `active` switch), `player_id=None` falls
+      back to obs["active"]. New multi-agent code MUST pass an explicit id.
     """
     # Default tolerance for "arrived at point" checks (in gfootball units).
     EPSILON: float = 0.03
 
-    def __init__(self, skill: Skill, team_side: TeamSide = "left") -> None:
+    def __init__(
+        self,
+        skill: Skill,
+        team_side: TeamSide = "left",
+        player_id: Optional[int] = None,
+    ) -> None:
         self.skill = skill
         self.team_side = team_side
+        self.player_id = player_id  # None = single-agent legacy mode
         self.tick_count: int = 0
 
     # --- helpers ----------------------------------------------------------
 
+    def _resolve_self_idx(self, obs: dict) -> int:
+        """Which player array index am I? Explicit player_id if set,
+        otherwise gfootball's auto-switching `active` (single-agent mode)."""
+        if self.player_id is not None:
+            return self.player_id
+        return int(obs["active"])
+
     def _self_pos_vel(self, obs: dict) -> tuple[np.ndarray, np.ndarray]:
         team_key = f"{self.team_side}_team"
-        active_idx = obs["active"]
-        return obs[team_key][active_idx], obs[f"{team_key}_direction"][active_idx]
+        idx = self._resolve_self_idx(obs)
+        return obs[team_key][idx], obs[f"{team_key}_direction"][idx]
 
     def _has_ball(self, obs: dict) -> bool:
         team_idx = 0 if self.team_side == "left" else 1
         return (
             obs["ball_owned_team"] == team_idx
-            and obs["ball_owned_player"] == obs["active"]
+            and obs["ball_owned_player"] == self._resolve_self_idx(obs)
         )
 
     def _opponent_goal_x(self) -> float:
@@ -447,7 +471,15 @@ SKILL_TO_CONTROLLER: dict[type[Skill], type[MotorController]] = {
 }
 
 
-def make_controller(skill: Skill, team_side: TeamSide = "left") -> MotorController:
-    """Factory — given a Skill instance, build the right MotorController."""
+def make_controller(
+    skill: Skill,
+    team_side: TeamSide = "left",
+    player_id: Optional[int] = None,
+) -> MotorController:
+    """Factory — given a Skill instance, build the right MotorController.
+
+    `player_id` is REQUIRED for multi-agent mode. None = single-agent legacy
+    mode where obs['active'] resolves "self" (gfootball's auto-switch).
+    """
     cls = SKILL_TO_CONTROLLER.get(type(skill), IdleController)
-    return cls(skill=skill, team_side=team_side)
+    return cls(skill=skill, team_side=team_side, player_id=player_id)
