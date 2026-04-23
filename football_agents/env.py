@@ -186,8 +186,46 @@ class FootballEnvAdapter:
 
         Used by AsyncRunner where the env-tick loop is decoupled from skill
         dispatch (which is what dispatch_skill() bundles synchronously).
+
+        SINGLE-AGENT path: when n_controlled_left > 1, fills non-primary
+        slots with IDLE so the primary slot gets `action`.
         """
         self._step_env(action)
+
+    def step_actions(self, actions: list[int]) -> None:
+        """MULTI-AGENT: step the env with one action per controlled slot.
+
+        For MultiAgentRunner where each of N players is independently
+        controlled by its own PlayerAgent. The list length MUST equal
+        n_controlled_left, ordered by slot index.
+
+        Differences from step_action(int):
+          - Takes ALL N actions explicitly (no IDLE-filling).
+          - Stores raw_obs as raw[0] — the canonical god-view. All N raw
+            views share identical world state; they differ only in the
+            `active` field, which is meaningless when controlling all N
+            players. Per-player perception filters in PlayerAgent use
+            their explicit player_id, not raw_obs["active"].
+        """
+        if len(actions) != self.n_controlled_left:
+            raise ValueError(
+                f"step_actions: expected {self.n_controlled_left} actions, "
+                f"got {len(actions)}"
+            )
+        step_arg = [int(a) for a in actions]
+        result = self._env.step(step_arg)
+        if len(result) == 5:
+            raw, reward, terminated, truncated, _info = result
+            done = bool(terminated or truncated)
+        else:
+            raw, reward, done, _info = result
+            done = bool(done)
+        # Multi-agent canonical god-view: take raw[0] (or raw if not a list).
+        # All slot views are identical except for `active`, which we don't use.
+        self._raw_obs = raw[0] if isinstance(raw, list) else raw
+        self._cumulative_reward += float(np.asarray(reward).sum())
+        self._done = done
+        self._tick += 1
 
     def set_last_skill(self, name: str, status: SkillStatus) -> None:
         """Mark the most-recently-active skill so the next observe() reflects it."""
