@@ -32,18 +32,39 @@ FallbackPolicy = Callable[[Observation], Skill]
 
 def body_rest_state_fallback(obs: Observation) -> Skill:
     """The motor cortex autopilot — what the body does between LLM decisions.
-    Slow, conservative; conserves stamina; keeps options open.
+
+    Designed to feel like a real footballer THINKING-while-moving during
+    the 2-4s LLM gap, not sprinting on autopilot. All branches use 'walk'
+    urgency (~25% jog speed via direction throttling in motor.py) so the
+    body drifts slowly enough that the brain's deliberate decisions still
+    look like the dominant force.
+
+    Three branches (still simple, still 3 cases — no rules expansion):
+      • has_ball   → walk-dribble toward midfield on current y-lane
+                     (don't auto-commit to a goal-bound sprint)
+      • sees ball  → walk 40% of the way toward the ball
+                     (drift toward, don't desperate-chase)
+      • no ball    → HoldPosition: stop and look around
+                     (the most natural "I'm thinking" footballer behavior)
     """
     if obs.self_state.has_ball:
-        return DribbleToward(target_x=0.95, target_y=0.0, urgency="jog")
+        # Carry ball slowly toward midfield, staying on current y-lane.
+        # Halfway-line target (0.6) keeps options open vs. committing to goal.
+        self_y = float(obs.self_state.position.y)
+        return DribbleToward(target_x=0.6, target_y=self_y, urgency="walk")
+
     ball = obs.ball()
     if ball is not None:
-        return MoveTo(
-            target_x=float(ball.position.x),
-            target_y=float(ball.position.y),
-            urgency="jog",
-        )
-    return MoveTo(target_x=0.5, target_y=0.0, urgency="jog")
+        # Drift 40% of the vector toward the ball — deliberate, not desperate.
+        self_pos = obs.self_state.position
+        target_x = float(self_pos.x) + 0.4 * (float(ball.position.x) - float(self_pos.x))
+        target_y = float(self_pos.y) + 0.4 * (float(ball.position.y) - float(self_pos.y))
+        return MoveTo(target_x=target_x, target_y=target_y, urgency="walk")
+
+    # No ball visible — the most thinking-looking thing a real player does
+    # is stop and scan the field. HoldPosition releases sticky direction;
+    # momentum decays and the body settles.
+    return HoldPosition()
 
 
 class AsyncRunner:

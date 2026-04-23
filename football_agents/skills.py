@@ -23,7 +23,12 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 PassType = Literal["short", "long", "through"]
-Urgency = Literal["jog", "sprint"]
+# Urgency tiers (slow → fast):
+#   walk   — throttled drift; used by fallback during LLM thinking gaps,
+#            also LLM-selectable when conserving stamina or holding shape
+#   jog    — gfootball base movement (no SPRINT pressed); steady running
+#   sprint — gfootball SPRINT sticky on; top speed, drains stamina
+Urgency = Literal["walk", "jog", "sprint"]
 ShootZone = Literal[
     "top_left", "top_center", "top_right",
     "bottom_left", "bottom_center", "bottom_right",

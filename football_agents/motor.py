@@ -152,12 +152,22 @@ class MotorController:
 # ---------------------------------------------------------------------------
 
 class MoveToController(MotorController):
-    """Walk/sprint toward (target_x, target_y).
+    """Walk / jog / sprint toward (target_x, target_y).
+
+    Urgency mapping:
+      - sprint: press SPRINT once at tick 1, then send direction every tick
+      - jog:    send direction every tick (gfootball base speed, no SPRINT)
+      - walk:   throttled cycle — direction → release → idle → idle → repeat
+                (~25% jog speed, with momentum decay between pushes; gives
+                a "drifting while thinking" feel during LLM gaps)
 
     On arrival: stay 'in_progress' with IDLE so sticky direction carries
     the player past the target naturally. Real players don't slam-stop when
     they reach a position — they keep moving until told otherwise.
     """
+
+    # Walk cycle: 4 ticks = 1 push + 1 release + 2 idle. ~25% jog speed.
+    _WALK_CYCLE_LEN = 4
 
     def step(self, obs: dict) -> tuple[int, SkillStatus]:
         self.tick_count += 1
@@ -165,10 +175,24 @@ class MoveToController(MotorController):
         pos, _ = self._self_pos_vel(obs)
         dx = skill.target_x - float(pos[0])
         dy = skill.target_y - float(pos[1])
+
+        # Sprint kickoff
         if skill.urgency == "sprint" and self.tick_count == 1:
             return A.SPRINT, "in_progress"
+
+        # Arrived — stop pushing direction, sticky carries us
         if math.hypot(dx, dy) < self.EPSILON:
-            return A.IDLE, "in_progress"  # sticky direction continues
+            return A.IDLE, "in_progress"
+
+        # Walk throttle — see _WALK_CYCLE_LEN docstring above
+        if skill.urgency == "walk":
+            phase = (self.tick_count - 1) % self._WALK_CYCLE_LEN
+            if phase == 1:
+                return A.RELEASE_DIRECTION, "in_progress"
+            if phase >= 2:
+                return A.IDLE, "in_progress"
+            # phase == 0: fall through to send direction
+
         return vector_to_action(dx, dy), "in_progress"
 
 
@@ -177,7 +201,13 @@ class DribbleTowardController(MotorController):
     arrived → stay in_progress with IDLE so sticky carries the player.
     Only failure case is loss of possession (-> 'failed', async runner
     swaps to fallback that picks a no-ball skill).
+
+    Walk urgency: same throttling pattern as MoveToController. DRIBBLE
+    sticky is independent of movement direction sticky, so we can release
+    direction without losing the dribble stance.
     """
+
+    _WALK_CYCLE_LEN = 4
 
     def step(self, obs: dict) -> tuple[int, SkillStatus]:
         self.tick_count += 1
@@ -187,10 +217,24 @@ class DribbleTowardController(MotorController):
         pos, _ = self._self_pos_vel(obs)
         dx = skill.target_x - pos[0]
         dy = skill.target_y - pos[1]
+
+        # Tick 1: enable DRIBBLE sticky (independent of movement)
         if self.tick_count == 1:
             return A.DRIBBLE, "in_progress"
+
+        # Arrived — sticky direction carries us
         if math.hypot(dx, dy) < self.EPSILON:
-            return A.IDLE, "in_progress"  # sticky direction carries us
+            return A.IDLE, "in_progress"
+
+        # Walk throttle (cycle starts at tick 2 since tick 1 was DRIBBLE)
+        if skill.urgency == "walk":
+            phase = (self.tick_count - 2) % self._WALK_CYCLE_LEN
+            if phase == 1:
+                return A.RELEASE_DIRECTION, "in_progress"
+            if phase >= 2:
+                return A.IDLE, "in_progress"
+            # phase == 0: fall through to send direction
+
         return vector_to_action(dx, dy), "in_progress"
 
 

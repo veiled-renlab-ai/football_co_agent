@@ -24,8 +24,11 @@ FIELD_Y_MIN, FIELD_Y_MAX = -0.42, 0.42
 
 # Perception tuning knobs (DEV_PLAN.md §6 lists these as open questions).
 FOV_HALF_ANGLE_DEG = 105.0   # human peripheral vision: ~105° each side of facing
-SIGHT_DISTANCE_FULL = 0.30   # within this radius, full info on entity
-SIGHT_DISTANCE_MAX = 0.60    # beyond this, entity invisible unless tracked
+SIGHT_DISTANCE_FULL = 0.30   # within this radius, full info incl. velocity
+SIGHT_DISTANCE_MAX = 0.60    # DEPRECATED: no longer used as visibility gate.
+                             # FOV is now the only filter; ATTENTION_CAP handles
+                             # cognitive load. Kept as constant for backward-compat
+                             # only — safe to remove once no callers reference it.
 ATTENTION_CAP = 7            # max entities a player can simultaneously track
 SHORT_TERM_MEMORY_TICKS = 30 # ~3 seconds at 10 Hz env tick rate
 
@@ -248,24 +251,25 @@ class EgocentricFilter:
             if ev is not None:
                 candidates.append((ev.distance, ev))
 
-        # Ball — special: not subject to FOV, always perceived if within MAX
+        # Ball — always perceived (a real player sees the ball anywhere
+        # on the pitch as long as they're looking that way / it's loud).
+        # No distance gate; the ball is the most important entity.
         ball_xyz = god_view["ball"]
         ball_pos = Vec2(float(ball_xyz[0]), float(ball_xyz[1]))
         ball_dist = self_pos.distance_to(ball_pos)
-        if ball_dist < SIGHT_DISTANCE_MAX:
-            ball_dir = god_view["ball_direction"]
-            candidates.append((
-                ball_dist,
-                EntityView(
-                    entity_id=self.BALL_ENTITY_ID,
-                    role="ball",
-                    position=ball_pos,
-                    velocity=Vec2(float(ball_dir[0]), float(ball_dir[1])),
-                    distance=ball_dist,
-                    in_current_fov=True,
-                    has_ball=False,
-                ),
-            ))
+        ball_dir = god_view["ball_direction"]
+        candidates.append((
+            ball_dist,
+            EntityView(
+                entity_id=self.BALL_ENTITY_ID,
+                role="ball",
+                position=ball_pos,
+                velocity=Vec2(float(ball_dir[0]), float(ball_dir[1])),
+                distance=ball_dist,
+                in_current_fov=True,
+                has_ball=False,
+            ),
+        ))
 
         # ---- attention cap ----------------------------------------------
         candidates.sort(key=lambda x: x[0])  # nearest first
@@ -335,16 +339,17 @@ class EgocentricFilter:
         dy = float(pos[1]) - self_pos.y
         distance = math.hypot(dx, dy)
 
-        if distance > SIGHT_DISTANCE_MAX:
-            return None
-
-        # Bearing relative to facing — normalize to [-180, 180]
+        # FOV is the ONLY visibility gate — distance does not filter entities
+        # out, only their velocity-detail level (see SIGHT_DISTANCE_FULL below).
+        # Real footballers can see the entire pitch within their facing cone;
+        # the ATTENTION_CAP further down handles cognitive load.
         bearing_deg = math.degrees(math.atan2(dy, dx))
         relative = (bearing_deg - facing_deg + 540.0) % 360.0 - 180.0
         if abs(relative) > FOV_HALF_ANGLE_DEG:
             return None  # not in FOV (no v0 memory)
 
-        # Within FULL: include velocity. Beyond FULL but within MAX: position only.
+        # Within FULL radius: full info incl. velocity. Beyond FULL: position
+        # only (you can SEE a far player but can't read their body angle precisely).
         velocity = None
         if distance <= SIGHT_DISTANCE_FULL:
             velocity = Vec2(float(vel[0]), float(vel[1]))
