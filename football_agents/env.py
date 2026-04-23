@@ -46,6 +46,8 @@ class FootballEnvAdapter:
         n_controlled_left: int = 1,
         primary_player_slot: int = 0,
         controlled_player_id: Optional[int] = None,  # legacy, only affects filter
+        physics_steps_per_frame: int = 2,
+        real_time: bool = True,
     ) -> None:
         """
         Args:
@@ -56,6 +58,20 @@ class FootballEnvAdapter:
               chosen action; the other slots get IDLE. For academy attacking
               scenarios, set n_controlled_left=2, primary_player_slot=1
               (player #0 is the GK, #1 is the attacker we want the LLM to drive).
+          physics_steps_per_frame: how many internal physics ticks gfootball
+              runs per env.step (and per rendered frame). gfootball's internal
+              constant PHYSICS_STEPS_PER_SECOND=100, so each env.step advances
+              the GAME TIME by `physics_steps_per_frame / 100` seconds.
+              Default 10 (gfootball's default) means each env.step = 100ms
+              game time, which combined with our ~58 step/s wall rate gives
+              ~5.8x real-time game pace (the world flies past while LLM thinks).
+              We default to 2 here (each step = 20ms game time) so 58 step/s
+              wall ≈ 1.16x real-time — close to natural pace, no choppy render.
+              Render frame rate stays at native (one frame per env.step).
+              Set to 1 for slower-than-real-time; 10 for legacy fast-mode.
+          real_time: pass through to gfootball's internal real_time flag
+              (used by the C++ engine for vsync-style render throttling
+              when render=True). True ≈ engine tries to pace itself.
         """
         self.scenario = scenario
         self.team_side = team_side
@@ -69,6 +85,10 @@ class FootballEnvAdapter:
             representation="raw",
             render=render,
             number_of_left_players_agent_controls=n_controlled_left,
+            other_config_options={
+                "physics_steps_per_frame": int(physics_steps_per_frame),
+                "real_time": bool(real_time),
+            },
         )
         if write_video:
             env_kwargs["write_video"] = True

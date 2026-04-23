@@ -90,21 +90,16 @@ class MultiAgentRunner:
         obs_refresh_every_ticks: int = 4,
         max_decisions_total: int = 200,
         max_wall_seconds: float = 300.0,
-        target_tick_hz: float = 10.0,
         on_decision: Optional[Callable[[dict], None]] = None,
     ) -> None:
         """
-        target_tick_hz: cap on how many env ticks per WALL second the main
-            loop will produce. gfootball runs as fast as we feed it, so
-            without a cap we run at ~58 ticks/s wall (way faster than real
-            time). Real football pace is roughly 10 game ticks per game
-            second, so target_tick_hz=10 makes 1 wall second ≈ 1 game
-            second — the LLM's 2.5s thinking time then only advances the
-            world by ~25 ticks (a real player's reaction window), not 145
-            ticks (a full attacking move).
-            Set to 0 or negative to disable the cap (legacy behavior).
-            Tune higher if you want smoother render at the cost of faster
-            game pace; lower for slower game (more LLM-relevant decisions).
+        Game-time pace is controlled by gfootball's `physics_steps_per_frame`
+        config (set in FootballEnvAdapter), NOT by main-loop sleeping.
+        gfootball does PHYSICS_STEPS_PER_SECOND=100 internal physics ticks
+        per game second; physics_steps_per_frame=N means each env.step
+        advances the game by N/100 seconds. Smaller N = slower game time
+        per render frame, while render frame rate stays high.
+        See FootballEnvAdapter(physics_steps_per_frame=...) to tune.
         """
         # --- validate agent slots (silent corruption guard) ---
         slots = [a.slot for a in agents]
@@ -124,9 +119,6 @@ class MultiAgentRunner:
         self.obs_refresh_every_ticks = obs_refresh_every_ticks
         self.max_decisions_total = max_decisions_total
         self.max_wall_seconds = max_wall_seconds
-        self._target_tick_dt = (
-            1.0 / target_tick_hz if target_tick_hz and target_tick_hz > 0 else 0.0
-        )
         self._on_decision_cb = on_decision
 
         self._decisions_completed: int = 0
@@ -170,7 +162,6 @@ class MultiAgentRunner:
                 time.sleep(0.05)
 
         wall_start = time.monotonic()
-        last_tick_wall = time.monotonic()
         # Initial last-push-tick; vary by agent so refresh cadence stays staggered
         # even after the startup jitter.
         last_obs_push_tick: dict[int, int] = {
@@ -232,19 +223,6 @@ class MultiAgentRunner:
                         obs = a.perceive(self.env.raw_obs, self.env.tick)
                         a.push_observation(obs)
                         last_obs_push_tick[a.player_id] = self.env.tick
-
-                # ---- 6. Cap env tick rate so wall time ≈ game time ----
-                # gfootball runs as fast as we feed it; without this cap the
-                # simulation flies past at ~58 ticks/s wall, meaning 2.5s of
-                # LLM thinking = 145 ticks of game advance. With cap at 10
-                # ticks/s wall, 2.5s LLM = 25 ticks (a realistic reaction
-                # window). The simulation feels like real-time football.
-                if self._target_tick_dt > 0:
-                    elapsed = time.monotonic() - last_tick_wall
-                    sleep_for = self._target_tick_dt - elapsed
-                    if sleep_for > 0:
-                        time.sleep(sleep_for)
-                    last_tick_wall = time.monotonic()
         finally:
             self._stop_flag.set()
             for a in self.agents:
