@@ -120,19 +120,39 @@ class LLMClient:
         temperature: float,
         max_tokens: int,
     ) -> LLMDecision:
-        """One chat completion + parse. Used by choose_tool with retry."""
-        response = self._client.chat.completions.create(
-            model=self.model,
+        """Stateless one-shot — system + single user msg, no history."""
+        return self.chat_with_messages(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},
             ],
             tools=tools,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+    def chat_with_messages(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        temperature: float = 0.4,
+        max_tokens: int = 4096,
+    ) -> LLMDecision:
+        """Lower-level — caller supplies the FULL message list (system +
+        history + new user). Used by LLMPlayer to maintain conversation
+        memory across stages and turns.
+
+        Returns LLMDecision (parses first tool_call) and includes the raw
+        assistant message via .raw_message so caller can append to history.
+        """
+        response = self._client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            tools=tools,
             tool_choice="auto",
             temperature=temperature,
             max_tokens=max_tokens,
-            # Verified working for GLM-4.7 on 火山方舟 Coding Plan
-            # (reasoning_tokens drops 125 → 0). See scripts/inspect_glm_response.py
             extra_body={"thinking": {"type": "disabled"}},
         )
         msg = response.choices[0].message

@@ -51,6 +51,12 @@ class LLMPlayer:
         # ... runner dispatches the skill, then loops ...
     """
 
+    # How many recent decision turns of conversation to keep.
+    # Each turn adds ~4-5 messages (user_obs, asst_stage1, tool_ack_1,
+    # asst_stage2, tool_ack_2). Memory keeps short-term continuity but
+    # caps so prompt doesn't bloat indefinitely.
+    MAX_HISTORY_TURNS: int = 5
+
     def __init__(
         self,
         *,
@@ -65,6 +71,9 @@ class LLMPlayer:
         self.llm_client = llm_client
         self._system_prompt = build_system_prompt(persona)
         self.history: list[TurnLog] = []
+        # Live conversation thread used for the LLM (excludes the system
+        # message — we prepend that at call time).
+        self._messages: list[dict[str, Any]] = []
 
     @staticmethod
     def _valid_skills_for(obs: Observation) -> list[type]:
@@ -110,21 +119,28 @@ class LLMPlayer:
         valid_skill_classes = self._valid_skills_for(observation)
         valid_set = set(valid_skill_classes)
 
-        # ---- Stage 1: progressive disclosure — pick a category ----
-        # Only categories that contain at least one currently-valid skill.
+        # Stage 1 categories: only those that contain at least one valid skill
+        from .skills import SKILL_CATEGORY  # local import (avoids circular)
         valid_categories = sorted({
-            c for s, c in __import__("football_agents.skills", fromlist=["SKILL_CATEGORY"]).SKILL_CATEGORY.items()
-            if s in valid_set
+            c for s, c in SKILL_CATEGORY.items() if s in valid_set
         })
         layer_1_tools = [
             t for t in layer_1_category_tools()
             if CATEGORY_TOOL_NAMES[t["function"]["name"]] in valid_categories
         ]
 
+        # ---- Append the new observation to the conversation thread ----
+        # This is the user "speaking" to the player about current situation.
+        new_user_msg: dict[str, Any] = {"role": "user", "content": obs_text}
+        msgs_for_stage1 = (
+            [{"role": "system", "content": self._system_prompt}]
+            + self._messages
+            + [new_user_msg]
+        )
+
         try:
-            stage1 = self.llm_client.choose_tool(
-                system_prompt=self._system_prompt,
-                user_message=obs_text,
+            stage1 = self.llm_client.chat_with_messages(
+                messages=msgs_for_stage1,
                 tools=layer_1_tools,
             )
         except Exception as e:
@@ -142,7 +158,20 @@ class LLMPlayer:
             logger.warning("Unknown category %r from stage-1", stage1.tool_name)
             return log_entry.skill
 
-        # ---- Stage 2: pick a specific skill within that category ----
+        # Append stage-1 to conversation (assistant tool_call + tool ack).
+        # This makes stage-2 see stage-1 in context naturally — no addendum needed.
+        stage1_assist_msg = stage1.raw_message.model_dump(exclude_none=True)
+        stage1_tool_call_id = stage1.raw_message.tool_calls[0].id
+        stage1_tool_ack = {
+            "role": "tool",
+            "tool_call_id": stage1_tool_call_id,
+            "content": f"OK，类目已选定: {category}。请从该类下选具体动作。",
+        }
+        self._messages.append(new_user_msg)
+        self._messages.append(stage1_assist_msg)
+        self._messages.append(stage1_tool_ack)
+
+        # ---- Stage 2: pick specific skill within the chosen category ----
         cat_skills = [s for s in skills_in_category(category) if s in valid_set]
         if not cat_skills:
             log_entry.error = f"no_valid_skills_in_category: {category}"
@@ -151,14 +180,13 @@ class LLMPlayer:
             return log_entry.skill
 
         stage2_tools = [skill_to_tool_schema(c) for c in cat_skills]
-        # Tiny addendum so LLM knows it already committed to the category.
-        # NOT a behavior rule — just continuity between the two API calls.
-        stage2_msg = obs_text + f"\n\n(你刚才决定要做 {category} 类动作；现在从这类的具体动作里选一个。)"
+        msgs_for_stage2 = (
+            [{"role": "system", "content": self._system_prompt}] + self._messages
+        )
 
         try:
-            stage2 = self.llm_client.choose_tool(
-                system_prompt=self._system_prompt,
-                user_message=stage2_msg,
+            stage2 = self.llm_client.chat_with_messages(
+                messages=msgs_for_stage2,
                 tools=stage2_tools,
             )
         except Exception as e:
@@ -168,13 +196,29 @@ class LLMPlayer:
             logger.warning("LLM stage-2 failed for player %s: %s", self.player_id, e)
             return log_entry.skill
 
+        # Append stage-2 to conversation
+        stage2_assist_msg = stage2.raw_message.model_dump(exclude_none=True)
+        stage2_tool_call_id = stage2.raw_message.tool_calls[0].id
+        stage2_tool_ack = {
+            "role": "tool",
+            "tool_call_id": stage2_tool_call_id,
+            "content": f"动作 {stage2.tool_name} 已经派给 motor 执行。",
+        }
+        self._messages.append(stage2_assist_msg)
+        self._messages.append(stage2_tool_ack)
+
+        # Trim conversation to the last N decision turns (each turn ≈ 5 messages)
+        max_msgs = self.MAX_HISTORY_TURNS * 5
+        if len(self._messages) > max_msgs:
+            self._messages = self._messages[-max_msgs:]
+
         # Combine reasoning from both stages for the visible log
-        combined_reasoning_parts = []
+        combined = []
         if stage1.reasoning:
-            combined_reasoning_parts.append(f"[{category}] {stage1.reasoning}")
+            combined.append(f"[{category}] {stage1.reasoning}")
         if stage2.reasoning:
-            combined_reasoning_parts.append(stage2.reasoning)
-        log_entry.reasoning = " // ".join(combined_reasoning_parts)
+            combined.append(stage2.reasoning)
+        log_entry.reasoning = " // ".join(combined)
         log_entry.tool_name = stage2.tool_name
         log_entry.tool_args = stage2.tool_args
 
