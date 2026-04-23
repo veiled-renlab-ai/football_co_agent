@@ -181,7 +181,10 @@ class MoveToController(MotorController):
     Tick 1: enforce sprint state — SPRINT for 'sprint', RELEASE_SPRINT for
             'jog' / 'walk' (so a jog right after a sprint actually clears
             sticky and goes back to base speed).
-    Tick 2+: push direction every tick (smooth movement, no stutters).
+    Tick 2+: push direction every tick toward target (smooth, no stutters).
+    Once within EPSILON of target: latch _arrived; first arrival tick fires
+            RELEASE_DIRECTION to kill momentum, subsequent ticks IDLE.
+            Stays at target until LLM installs a new skill (no oscillation).
 
     Note on 'walk' urgency: gfootball has no native walk action — base
     speed is already 'jog' (no SPRINT pressed). 'walk' is treated the
@@ -189,16 +192,18 @@ class MoveToController(MotorController):
     earlier prompt iterations expose it to the LLM, but it's a no-op
     differentiator at the motor layer.
 
-    Earlier versions added walk-cycle throttling (push/release/idle×4)
-    and burst-then-decay (10 sprint ticks then auto-walk) to slow the
-    agent during LLM thinking gaps. Both produced visibly jerky motion.
-    Removed in favor of: env-level pacing (physics_steps_per_frame=2 +
-    target_wall_fps=50 → 1.0x real-time game) means the agent moves at
-    realistic speeds anyway, with no need for motor-layer throttling.
-
-    On arrival: stay 'in_progress' with IDLE so sticky direction carries
-    the player past the target naturally. Real players don't slam-stop.
+    BUG FIX (走两步就回头): previously on arrival we just sent IDLE without
+    releasing sticky direction. Sticky carried the player past the target
+    by more than EPSILON; the next tick's dx/dy was reversed; controller
+    sent the OPPOSITE direction; player turned around. Then overshot the
+    other way, repeated. Visible left-right oscillation. The latch + one
+    RELEASE_DIRECTION on first arrival fixes this.
     """
+
+    def __init__(self, skill: Skill, team_side: TeamSide = "left",
+                 player_id: Optional[int] = None) -> None:
+        super().__init__(skill, team_side, player_id)
+        self._arrived: bool = False
 
     def step(self, obs: dict) -> tuple[int, SkillStatus]:
         self.tick_count += 1
@@ -213,11 +218,19 @@ class MoveToController(MotorController):
                 return A.SPRINT, "in_progress"
             return A.RELEASE_SPRINT, "in_progress"
 
-        # Arrived — sticky direction carries us
-        if math.hypot(dx, dy) < self.EPSILON:
+        # First-time arrival: latch + release sticky direction so momentum
+        # decays naturally instead of overshooting. Latching prevents the
+        # oscillation bug — once arrived, never push direction again
+        # (until controller is replaced by a new skill).
+        if not self._arrived and math.hypot(dx, dy) < self.EPSILON:
+            self._arrived = True
+            return A.RELEASE_DIRECTION, "in_progress"
+
+        # Already arrived — stay still
+        if self._arrived:
             return A.IDLE, "in_progress"
 
-        # Push direction every tick — smooth continuous motion at chosen speed
+        # Push direction every tick — smooth continuous motion
         return vector_to_action(dx, dy), "in_progress"
 
 
@@ -227,14 +240,17 @@ class DribbleTowardController(MotorController):
     Tick 1: DRIBBLE                (enable shielding-stance sticky)
     Tick 2: SPRINT or RELEASE_SPRINT (per LLM urgency, independent of DRIBBLE)
     Tick 3+: push direction every tick (smooth)
+    On arrival: latch + RELEASE_DIRECTION once, then IDLE forever (same
+    overshoot-prevention pattern as MoveToController).
 
     Failure case: lose possession → RELEASE_DRIBBLE + status='failed' so
     the runner re-arms a fallback that picks a no-ball skill.
-
-    See MoveToController docstring for why walk-cycle/burst-decay were
-    removed (they made motion visibly jerky; env-level real-time pacing
-    handles speed control more naturally).
     """
+
+    def __init__(self, skill: Skill, team_side: TeamSide = "left",
+                 player_id: Optional[int] = None) -> None:
+        super().__init__(skill, team_side, player_id)
+        self._arrived: bool = False
 
     def step(self, obs: dict) -> tuple[int, SkillStatus]:
         self.tick_count += 1
@@ -255,8 +271,16 @@ class DribbleTowardController(MotorController):
                 return A.SPRINT, "in_progress"
             return A.RELEASE_SPRINT, "in_progress"
 
-        # Arrived — sticky direction carries us
-        if math.hypot(dx, dy) < self.EPSILON:
+        # First-time arrival: latch + release direction (kills overshoot
+        # momentum and prevents the back-and-forth oscillation that fires
+        # when sticky direction carries us past the target).
+        if not self._arrived and math.hypot(dx, dy) < self.EPSILON:
+            self._arrived = True
+            return A.RELEASE_DIRECTION, "in_progress"
+
+        # Already arrived — stay still (DRIBBLE sticky still active for
+        # ball-shielding; just no direction push)
+        if self._arrived:
             return A.IDLE, "in_progress"
 
         # Push direction every tick — smooth continuous dribble
