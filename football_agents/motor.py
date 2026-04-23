@@ -176,39 +176,29 @@ class MotorController:
 # ---------------------------------------------------------------------------
 
 class MoveToController(MotorController):
-    """Walk / jog / sprint toward (target_x, target_y).
+    """Move toward (target_x, target_y) at LLM-chosen urgency. Smooth and continuous.
 
-    Two-phase execution to match LLM thinking rhythm:
+    Tick 1: enforce sprint state — SPRINT for 'sprint', RELEASE_SPRINT for
+            'jog' / 'walk' (so a jog right after a sprint actually clears
+            sticky and goes back to base speed).
+    Tick 2+: push direction every tick (smooth movement, no stutters).
 
-      BURST PHASE (first _BURST_TICKS ticks): execute LLM-chosen urgency.
-        sprint → SPRINT sticky on, full direction press every tick
-        jog    → no SPRINT, direction press every tick (gfootball base speed)
-        walk   → no SPRINT, walk cycle (push/release/idle×4)
+    Note on 'walk' urgency: gfootball has no native walk action — base
+    speed is already 'jog' (no SPRINT pressed). 'walk' is treated the
+    same as 'jog' here. We keep 'walk' in the Urgency literal because
+    earlier prompt iterations expose it to the LLM, but it's a no-op
+    differentiator at the motor layer.
 
-      DECAY PHASE (after _BURST_TICKS): force walk-speed regardless of
-        LLM urgency. The intent (target) is preserved; only the speed
-        degrades. This stops the agent from sprinting through the world
-        for 2-3 seconds while the LLM is still thinking about the next
-        decision. Real footballers burst then settle — same mechanism.
+    Earlier versions added walk-cycle throttling (push/release/idle×4)
+    and burst-then-decay (10 sprint ticks then auto-walk) to slow the
+    agent during LLM thinking gaps. Both produced visibly jerky motion.
+    Removed in favor of: env-level pacing (physics_steps_per_frame=2 +
+    target_wall_fps=50 → 1.0x real-time game) means the agent moves at
+    realistic speeds anyway, with no need for motor-layer throttling.
 
-    Why this exists:
-      MoveTo never status='completed' (the runner never re-arms a fallback).
-      So before this, an LLM-picked sprint kept executing at full speed
-      until the next LLM decision (~2.5s = ~145 ticks at 58fps wall).
-      Result: agent sprinted across the field while brain was still
-      figuring out what to do. Burst+decay caps that to a brief burst
-      followed by a deliberate walk.
-
-    Tune _BURST_TICKS: smaller = less sprint per decision = slower agent.
+    On arrival: stay 'in_progress' with IDLE so sticky direction carries
+    the player past the target naturally. Real players don't slam-stop.
     """
-
-    # Walk cycle: 6 ticks = 1 push + 1 release + 4 idle. ~17% jog speed.
-    _WALK_CYCLE_LEN = 6
-    # Burst length: how long to honor LLM urgency before decaying to walk.
-    # 10 ticks ≈ 170ms wall at gfootball's ~58 tick/s rendered rate. The
-    # remaining ~2.3s of LLM thinking time is at walk pace. Smaller =
-    # slower agent overall; larger = more burst per decision.
-    _BURST_TICKS = 10
 
     def step(self, obs: dict) -> tuple[int, SkillStatus]:
         self.tick_count += 1
@@ -223,57 +213,28 @@ class MoveToController(MotorController):
                 return A.SPRINT, "in_progress"
             return A.RELEASE_SPRINT, "in_progress"
 
-        # Decay transition: when burst ends, release sprint (sprint only —
-        # jog/walk already released, walk just continues its cycle)
-        if self.tick_count == 2 + self._BURST_TICKS and skill.urgency == "sprint":
-            return A.RELEASE_SPRINT, "in_progress"
-
         # Arrived — sticky direction carries us
         if math.hypot(dx, dy) < self.EPSILON:
             return A.IDLE, "in_progress"
 
-        # Determine effective urgency: LLM choice during burst, walk after
-        in_burst = self.tick_count <= 1 + self._BURST_TICKS
-        effective_walk = (skill.urgency == "walk") or (not in_burst)
-
-        if effective_walk:
-            # Cycle start tick depends on history (when did walking begin):
-            #   walk urgency: from tick 2 (right after setup)
-            #   sprint decayed: from tick 3 + BURST (after release_sprint transition)
-            #   jog decayed: from tick 2 + BURST (no transition tick needed)
-            if skill.urgency == "walk":
-                cycle_start = 2
-            elif skill.urgency == "sprint":
-                cycle_start = 3 + self._BURST_TICKS
-            else:  # jog → walk
-                cycle_start = 2 + self._BURST_TICKS
-            phase = (self.tick_count - cycle_start) % self._WALK_CYCLE_LEN
-            if phase == 1:
-                return A.RELEASE_DIRECTION, "in_progress"
-            if phase >= 2:
-                return A.IDLE, "in_progress"
-            # phase == 0: fall through to push direction
-
+        # Push direction every tick — smooth continuous motion at chosen speed
         return vector_to_action(dx, dy), "in_progress"
 
 
 class DribbleTowardController(MotorController):
-    """Like MoveTo but with DRIBBLE sticky on. Same burst+decay model as
-    MoveToController — see that class's docstring for the full motivation.
+    """Like MoveTo but with DRIBBLE sticky on. Smooth and continuous.
 
-    Setup ticks before motion:
-      tick 1: DRIBBLE                (enable shielding-stance sticky)
-      tick 2: SPRINT/RELEASE_SPRINT  (per LLM urgency)
+    Tick 1: DRIBBLE                (enable shielding-stance sticky)
+    Tick 2: SPRINT or RELEASE_SPRINT (per LLM urgency, independent of DRIBBLE)
+    Tick 3+: push direction every tick (smooth)
 
-    Then BURST PHASE (next _BURST_TICKS ticks at LLM-chosen urgency),
-    then DECAY PHASE (force walk speed).
+    Failure case: lose possession → RELEASE_DRIBBLE + status='failed' so
+    the runner re-arms a fallback that picks a no-ball skill.
 
-    DRIBBLE and SPRINT are INDEPENDENT sticky flags. SPRINT can be
-    released without losing the DRIBBLE shielding stance.
+    See MoveToController docstring for why walk-cycle/burst-decay were
+    removed (they made motion visibly jerky; env-level real-time pacing
+    handles speed control more naturally).
     """
-
-    _WALK_CYCLE_LEN = 6
-    _BURST_TICKS = 10
 
     def step(self, obs: dict) -> tuple[int, SkillStatus]:
         self.tick_count += 1
@@ -294,36 +255,11 @@ class DribbleTowardController(MotorController):
                 return A.SPRINT, "in_progress"
             return A.RELEASE_SPRINT, "in_progress"
 
-        # Decay transition: when burst ends, release sprint (sprint case only)
-        if self.tick_count == 3 + self._BURST_TICKS and skill.urgency == "sprint":
-            return A.RELEASE_SPRINT, "in_progress"
-
         # Arrived — sticky direction carries us
         if math.hypot(dx, dy) < self.EPSILON:
             return A.IDLE, "in_progress"
 
-        # Effective urgency: LLM choice during burst, walk after
-        in_burst = self.tick_count <= 2 + self._BURST_TICKS
-        effective_walk = (skill.urgency == "walk") or (not in_burst)
-
-        if effective_walk:
-            # Cycle start (DribbleToward has 2 setup ticks vs MoveTo's 1):
-            #   walk urgency: from tick 3 (after DRIBBLE + RELEASE_SPRINT)
-            #   sprint decayed: from tick 4 + BURST (after release_sprint transition)
-            #   jog decayed: from tick 3 + BURST
-            if skill.urgency == "walk":
-                cycle_start = 3
-            elif skill.urgency == "sprint":
-                cycle_start = 4 + self._BURST_TICKS
-            else:  # jog → walk
-                cycle_start = 3 + self._BURST_TICKS
-            phase = (self.tick_count - cycle_start) % self._WALK_CYCLE_LEN
-            if phase == 1:
-                return A.RELEASE_DIRECTION, "in_progress"
-            if phase >= 2:
-                return A.IDLE, "in_progress"
-            # phase == 0: fall through to push direction
-
+        # Push direction every tick — smooth continuous dribble
         return vector_to_action(dx, dy), "in_progress"
 
 
