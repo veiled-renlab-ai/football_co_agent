@@ -40,7 +40,7 @@ from .llm_client import LLMClient
 from .motor import MotorController, SkillStatus, make_controller
 from .perception import EgocentricFilter, Observation, Role, Team
 from .prompts import PlayerPersona
-from .skills import Skill, Track
+from .skills import ScanBehind, Skill, Track
 
 logger = logging.getLogger(__name__)
 
@@ -144,9 +144,14 @@ class PlayerAgent:
     def install_skill(self, skill: Skill) -> None:
         """Replace current motor controller with one for the given skill.
 
-        Special-case: Track is a perception side-effect — apply directly to
-        this agent's filter (NOT routed through env, since env is now neutral
-        in multi-agent mode and doesn't know about per-player track state).
+        Special-cases routed to perception layer (no body motion):
+          - Track:      perception.track_entity(eid) — force-include in FOV
+          - ScanBehind: perception.scan_behind() — bypass FOV cone for next obs
+        These were originally motor actions (Track moved a phantom direction;
+        ScanBehind pressed LEFT for one tick to physically turn). Both caused
+        visible jerks in the render. Now they're pure perception flips: the
+        body keeps doing whatever sticky state it had, only the brain's view
+        of the world expands for that one decision tick.
         """
         if isinstance(skill, Track):
             try:
@@ -155,6 +160,14 @@ class PlayerAgent:
                 logger.warning(
                     "agent[pid=%d] track_entity(%s) failed: %s",
                     self.player_id, skill.entity_id, e,
+                )
+        elif isinstance(skill, ScanBehind):
+            try:
+                self.perception.scan_behind()
+            except Exception as e:
+                logger.warning(
+                    "agent[pid=%d] scan_behind() failed: %s",
+                    self.player_id, e,
                 )
         self.current_controller = make_controller(
             skill, team_side=self.team_side, player_id=self.player_id,

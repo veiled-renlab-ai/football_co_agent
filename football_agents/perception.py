@@ -169,6 +169,11 @@ class EgocentricFilter:
         # The id is interpreted in BOTH teams (LLM doesn't distinguish on Track skill);
         # whichever exists gets added.
         self._tracked_entity_ids: set[int] = set()
+        # One-shot scan-behind: when True, NEXT filter() bypasses FOV cone
+        # entirely (sees in all directions for that one observation), then
+        # the flag clears. Lets the LLM "glance over the shoulder" without
+        # a visible body-turn jerk in the render.
+        self._scan_behind_pending: bool = False
 
     # ----- public side-effect API used when LLM picks Track skill -----
 
@@ -182,6 +187,17 @@ class EgocentricFilter:
     def untrack_entity(self, entity_id: int) -> None:
         """Remove an entity from the tracked set."""
         self._tracked_entity_ids.discard(int(entity_id))
+
+    def scan_behind(self) -> None:
+        """Arm a one-shot 'see in all directions' for the next filter() call.
+
+        Used when LLM picks the ScanBehind skill — instead of physically
+        turning the body (which causes a visible jerk in the render), we
+        just let the brain glance backward for one decision tick. The
+        next observation includes entities behind the agent, then the
+        FOV returns to its normal forward cone.
+        """
+        self._scan_behind_pending = True
 
     def filter(self, god_view: dict, tick: int) -> Observation:
         team_key = "left_team" if self.team == "team_a" else "right_team"
@@ -311,6 +327,9 @@ class EgocentricFilter:
                     already_keys.add((role_label, tid))
 
         # ---- assemble observation ---------------------------------------
+        # Consume the one-shot scan-behind flag (only valid for THIS observation).
+        if self._scan_behind_pending:
+            self._scan_behind_pending = False
         score = god_view.get("score", [0, 0])
         return Observation(
             tick=tick,
@@ -343,10 +362,14 @@ class EgocentricFilter:
         # out, only their velocity-detail level (see SIGHT_DISTANCE_FULL below).
         # Real footballers can see the entire pitch within their facing cone;
         # the ATTENTION_CAP further down handles cognitive load.
-        bearing_deg = math.degrees(math.atan2(dy, dx))
-        relative = (bearing_deg - facing_deg + 540.0) % 360.0 - 180.0
-        if abs(relative) > FOV_HALF_ANGLE_DEG:
-            return None  # not in FOV (no v0 memory)
+        # When _scan_behind_pending is set (LLM picked ScanBehind last decision),
+        # the FOV check is bypassed for one observation — the brain glances
+        # backward. The flag is cleared at the end of filter().
+        if not self._scan_behind_pending:
+            bearing_deg = math.degrees(math.atan2(dy, dx))
+            relative = (bearing_deg - facing_deg + 540.0) % 360.0 - 180.0
+            if abs(relative) > FOV_HALF_ANGLE_DEG:
+                return None  # not in FOV (no v0 memory)
 
         # Within FULL radius: full info incl. velocity. Beyond FULL: position
         # only (you can SEE a far player but can't read their body angle precisely).

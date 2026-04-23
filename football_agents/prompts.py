@@ -154,6 +154,37 @@ def _describe_stamina(s: float) -> str:
     return "气喘吁吁"
 
 
+def _describe_velocity(v: Vec2) -> str:
+    """Convert per-tick velocity into a footballer-natural speed phrase.
+    Values are in gfootball normalized units (per env step). With pps=2,
+    real footballer jog ≈ 0.0024/step, sprint ≈ 0.0036/step. Thresholds
+    here are loose buckets — the goal is to give the LLM a sense of
+    'moving vs stationary vs sprinting', not exact m/s.
+    """
+    import math
+    speed = math.hypot(v.x, v.y)
+    if speed < 0.0008: return "现在原地不动（站着）"
+    if speed < 0.0020: return "现在慢速移动（刚启动 / 减速中）"
+    if speed < 0.0035: return "现在中速跑动（jog）"
+    return "现在全速冲刺（sprint）"
+
+
+def _describe_facing(facing_deg: float) -> str:
+    """Which way the body is currently pointing, in football terms.
+    +x (deg≈0) = toward opponent goal (forward when attacking left→right)
+    """
+    # Normalize to (-180, 180]
+    d = ((facing_deg + 180) % 360) - 180
+    if -22.5 <= d < 22.5: return "面朝对方球门（正前方）"
+    if 22.5 <= d < 67.5: return "面朝右前"
+    if 67.5 <= d < 112.5: return "面朝右路"
+    if 112.5 <= d < 157.5: return "面朝右后"
+    if d >= 157.5 or d < -157.5: return "面朝自家球门（正后方）"
+    if -67.5 <= d < -22.5: return "面朝左前"
+    if -112.5 <= d < -67.5: return "面朝左路"
+    return "面朝左后"
+
+
 _SKILL_NAME_CN = {
     "MoveTo": "跑位", "HoldPosition": "站位",
     "DribbleToward": "带球突破", "PassTo": "传球", "Shoot": "射门",
@@ -183,10 +214,13 @@ def render_observation(obs: Observation, persona: PlayerPersona) -> str:
     lines.append(f"【比赛进行到 {obs.match_clock}，比分 {obs.score[0]} : {obs.score[1]}】")
     lines.append("")
 
-    # Self
+    # Self — position + speed + facing + stamina (so LLM has full self-awareness)
     lines.append(
         f"你（{persona.name}，{persona.jersey_number}号 {persona.position}）"
         f"现在站在{_describe_position(s.position)}，{_describe_stamina(s.stamina)}。"
+    )
+    lines.append(
+        f"  · {_describe_velocity(s.velocity)}，{_describe_facing(s.facing_deg)}。"
     )
 
     # Ball state — EXPLICIT possession line

@@ -458,18 +458,23 @@ class TackleController(MotorController):
 # ---------------------------------------------------------------------------
 
 class ScanBehindController(MotorController):
-    """Quick over-the-shoulder check — turn around briefly.
+    """ScanBehind is a PERCEPTION side-effect (handled in PlayerAgent.install_skill,
+    via EgocentricFilter.scan_behind() — bypasses FOV cone for one obs).
 
-    Mechanics: send the opposite of player's current direction for one tick
-    (gfootball will face that way for the next observation, expanding FOV
-    behind). Then complete.
+    The motor side does NOTHING — the body keeps doing whatever its sticky
+    state was (running forward / dribbling / standing). Previously this
+    controller pressed LEFT for one tick to physically turn the body, which
+    caused a visible 180° jerk in the render mid-motion. Removed in favor
+    of pure perception side-effect (parallel to how Track was moved
+    motor → perception in v0.track-fix).
+
+    Status: completes immediately so the runner re-arms the appropriate
+    fallback (the body keeps doing something while the brain processed
+    the glance backward).
     """
 
     def step(self, obs: dict) -> tuple[int, SkillStatus]:
         self.tick_count += 1
-        if self.tick_count == 1:
-            # Turn toward our own goal direction (= behind, when attacking)
-            return (A.LEFT if self.team_side == "left" else A.RIGHT, "in_progress")
         return A.IDLE, "completed"
 
 
