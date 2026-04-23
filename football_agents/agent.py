@@ -51,11 +51,12 @@ class LLMPlayer:
         # ... runner dispatches the skill, then loops ...
     """
 
-    # How many recent decision turns of conversation to keep.
-    # Each turn adds ~4-5 messages (user_obs, asst_stage1, tool_ack_1,
-    # asst_stage2, tool_ack_2). Memory keeps short-term continuity but
-    # caps so prompt doesn't bloat indefinitely.
-    MAX_HISTORY_TURNS: int = 5
+    # 3-tier memory:
+    #   - last X turns: kept VERBATIM (full message exchange)
+    #   - turns X+1..Y: compressed to 1-line summaries ("choose_attack → shoot(top_center)")
+    #   - older than Y: dropped
+    MAX_RECENT_TURNS: int = 3
+    MAX_TOTAL_TURNS: int = 8   # so compressed-zone holds (8-3)=5 summaries
 
     def __init__(
         self,
@@ -71,9 +72,63 @@ class LLMPlayer:
         self.llm_client = llm_client
         self._system_prompt = build_system_prompt(persona)
         self.history: list[TurnLog] = []
-        # Live conversation thread used for the LLM (excludes the system
-        # message — we prepend that at call time).
-        self._messages: list[dict[str, Any]] = []
+        # Recent turns: list of [user_obs, asst_s1, tool_ack_1, asst_s2, tool_ack_2]
+        self._recent_turns: list[list[dict[str, Any]]] = []
+        # Compressed summaries: one short string per older turn
+        self._compressed_summaries: list[str] = []
+
+    # ----------------------------------------------------------------
+    # Memory helpers
+    # ----------------------------------------------------------------
+
+    @staticmethod
+    def _compress_turn(turn_msgs: list[dict[str, Any]]) -> str:
+        """Squash one decision turn into a single-line summary string."""
+        parts: list[str] = []
+        for m in turn_msgs:
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                tc = m["tool_calls"][0]
+                name = tc["function"]["name"]
+                args = tc["function"]["arguments"]
+                if args and args != "{}":
+                    parts.append(f"{name}({args})")
+                else:
+                    parts.append(f"{name}()")
+        return " → ".join(parts) if parts else "(no tool call)"
+
+    def _build_messages(
+        self, new_user_msg: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Assemble the full message list to send to the LLM:
+        system + (compressed-recap if any) + recent verbatim turns + new user.
+        """
+        msgs: list[dict[str, Any]] = [
+            {"role": "system", "content": self._system_prompt}
+        ]
+        if self._compressed_summaries:
+            recap = "（你最近几轮的动作回顾，按时间从早到晚）\n" + "\n".join(
+                f"  · 第 {-len(self._compressed_summaries) + i + 1} 轮前: {s}"
+                for i, s in enumerate(self._compressed_summaries)
+            )
+            msgs.append({"role": "user", "content": recap})
+            msgs.append({"role": "assistant", "content": "好的，我记得这些。"})
+        for turn in self._recent_turns:
+            msgs.extend(turn)
+        msgs.append(new_user_msg)
+        return msgs
+
+    def _commit_turn(self, turn_msgs: list[dict[str, Any]]) -> None:
+        """After a successful decision turn, push messages into memory and
+        compress / drop as needed per 3-tier policy."""
+        self._recent_turns.append(turn_msgs)
+        # Tier 1 → Tier 2: oldest recent gets compressed
+        while len(self._recent_turns) > self.MAX_RECENT_TURNS:
+            oldest = self._recent_turns.pop(0)
+            self._compressed_summaries.append(self._compress_turn(oldest))
+        # Tier 2 → Tier 3 (delete): drop oldest compressed beyond budget
+        max_compressed = self.MAX_TOTAL_TURNS - self.MAX_RECENT_TURNS
+        while len(self._compressed_summaries) > max_compressed:
+            self._compressed_summaries.pop(0)
 
     @staticmethod
     def _valid_skills_for(obs: Observation) -> list[type]:
@@ -129,14 +184,9 @@ class LLMPlayer:
             if CATEGORY_TOOL_NAMES[t["function"]["name"]] in valid_categories
         ]
 
-        # ---- Append the new observation to the conversation thread ----
-        # This is the user "speaking" to the player about current situation.
+        # ---- Build messages with 3-tier memory ----
         new_user_msg: dict[str, Any] = {"role": "user", "content": obs_text}
-        msgs_for_stage1 = (
-            [{"role": "system", "content": self._system_prompt}]
-            + self._messages
-            + [new_user_msg]
-        )
+        msgs_for_stage1 = self._build_messages(new_user_msg)
 
         try:
             stage1 = self.llm_client.chat_with_messages(
@@ -158,8 +208,6 @@ class LLMPlayer:
             logger.warning("Unknown category %r from stage-1", stage1.tool_name)
             return log_entry.skill
 
-        # Append stage-1 to conversation (assistant tool_call + tool ack).
-        # This makes stage-2 see stage-1 in context naturally — no addendum needed.
         stage1_assist_msg = stage1.raw_message.model_dump(exclude_none=True)
         stage1_tool_call_id = stage1.raw_message.tool_calls[0].id
         stage1_tool_ack = {
@@ -167,9 +215,6 @@ class LLMPlayer:
             "tool_call_id": stage1_tool_call_id,
             "content": f"OK，类目已选定: {category}。请从该类下选具体动作。",
         }
-        self._messages.append(new_user_msg)
-        self._messages.append(stage1_assist_msg)
-        self._messages.append(stage1_tool_ack)
 
         # ---- Stage 2: pick specific skill within the chosen category ----
         cat_skills = [s for s in skills_in_category(category) if s in valid_set]
@@ -180,9 +225,8 @@ class LLMPlayer:
             return log_entry.skill
 
         stage2_tools = [skill_to_tool_schema(c) for c in cat_skills]
-        msgs_for_stage2 = (
-            [{"role": "system", "content": self._system_prompt}] + self._messages
-        )
+        # Stage 2 sees: system + memory + new_user + stage1_asst + stage1_ack
+        msgs_for_stage2 = msgs_for_stage1 + [stage1_assist_msg, stage1_tool_ack]
 
         try:
             stage2 = self.llm_client.chat_with_messages(
@@ -196,7 +240,6 @@ class LLMPlayer:
             logger.warning("LLM stage-2 failed for player %s: %s", self.player_id, e)
             return log_entry.skill
 
-        # Append stage-2 to conversation
         stage2_assist_msg = stage2.raw_message.model_dump(exclude_none=True)
         stage2_tool_call_id = stage2.raw_message.tool_calls[0].id
         stage2_tool_ack = {
@@ -204,13 +247,16 @@ class LLMPlayer:
             "tool_call_id": stage2_tool_call_id,
             "content": f"动作 {stage2.tool_name} 已经派给 motor 执行。",
         }
-        self._messages.append(stage2_assist_msg)
-        self._messages.append(stage2_tool_ack)
 
-        # Trim conversation to the last N decision turns (each turn ≈ 5 messages)
-        max_msgs = self.MAX_HISTORY_TURNS * 5
-        if len(self._messages) > max_msgs:
-            self._messages = self._messages[-max_msgs:]
+        # Commit this turn into 3-tier memory (recent → compress → drop)
+        this_turn_msgs = [
+            new_user_msg,
+            stage1_assist_msg,
+            stage1_tool_ack,
+            stage2_assist_msg,
+            stage2_tool_ack,
+        ]
+        self._commit_turn(this_turn_msgs)
 
         # Combine reasoning from both stages for the visible log
         combined = []
