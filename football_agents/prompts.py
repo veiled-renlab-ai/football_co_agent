@@ -56,6 +56,9 @@ class PlayerPersona:
     team_profile: Optional[TeamProfile] = None  # optional team-style trait
                                                 # (Phase 5c). None = no team
                                                 # section in system prompt.
+    position_discipline: Optional[str] = None  # per-position behavioral
+                                               # guide (Phase 5e). None =
+                                               # no position section in prompt.
 
 
 DEFAULT_PERSONA = PlayerPersona(
@@ -88,6 +91,13 @@ def _skill_metadata_section() -> str:
 
 
 def build_system_prompt(persona: PlayerPersona) -> str:
+    universal_discipline_section = (
+        "\n## 球场守则（所有球员通用）\n"
+        "\n足球不是 10 个人都追球。我必须时刻问自己：\"**离球最近的是不是我？**\"\n"
+        "\n- **是** → 我去抢/接\n- **否** → 我**不要也冲过去**，去找空当或防守\n"
+        "\n两个人扑同一个球 = 后场漏空 = 对方反击送球。\n"
+    )
+
     if persona.team_profile is not None:
         team_section = (
             f"\n## 我们球队（{persona.team_profile.name}）的风格\n"
@@ -97,6 +107,14 @@ def build_system_prompt(persona: PlayerPersona) -> str:
     else:
         team_section = ""
 
+    if persona.position_discipline is not None:
+        position_discipline_section = (
+            f"\n## 我的位置职责（{persona.position}）\n"
+            f"\n{persona.position_discipline}\n"
+        )
+    else:
+        position_discipline_section = ""
+
     return f"""# 我是{persona.name}
 
 我是 {persona.name}，{persona.age} 岁，{persona.nationality}人，{persona.team}的{persona.position}，球衣 {persona.jersey_number} 号。
@@ -104,7 +122,9 @@ def build_system_prompt(persona: PlayerPersona) -> str:
 {persona.background}
 
 我的球风是 —— {persona.play_style}
+{universal_discipline_section}
 {team_section}
+{position_discipline_section}
 ## 现在
 
 我正在球场上踢这场比赛。和队友们协作、和对手对抗，目标是赢下这场。
