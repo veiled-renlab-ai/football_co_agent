@@ -66,8 +66,7 @@ class MoveTo(Skill):
     """Move (without ball) to a target field point."""
     tool_name: ClassVar[str] = "move_to"
     description: ClassVar[str] = (
-        "Run to a specific field coordinate. Use to take up position, "
-        "make a run into space, or get back on defense."
+        "跑到场上指定坐标。无球时调整位置、跑空当、或回防时用。"
     )
     target_x: float                   # gfootball coords, [-1, 1]
     target_y: float                   # gfootball coords, [-0.42, 0.42]
@@ -78,7 +77,7 @@ class MoveTo(Skill):
 class HoldPosition(Skill):
     """Stay where you are; useful for defensive shape or waiting for a pass."""
     tool_name: ClassVar[str] = "hold_position"
-    description: ClassVar[str] = "Stand still and maintain current position."
+    description: ClassVar[str] = "站住不动，保持当前位置。等队友传球或维持阵型时用。"
 
 
 @dataclass(frozen=True)
@@ -86,7 +85,7 @@ class DribbleToward(Skill):
     """Carry the ball toward a field point. Requires possession."""
     tool_name: ClassVar[str] = "dribble_toward"
     description: ClassVar[str] = (
-        "Dribble the ball toward a target coordinate. Requires possession."
+        "带球朝指定坐标突破推进。需要脚下有球。"
     )
     target_x: float
     target_y: float
@@ -105,8 +104,8 @@ class PassTo(Skill):
     """Pass the ball to a specific teammate. Requires possession."""
     tool_name: ClassVar[str] = "pass_to"
     description: ClassVar[str] = (
-        "Pass the ball to teammate by player id. "
-        "type='short' (ground), 'long' (lofted), 'through' (in behind defenders)."
+        "把球传给指定球衣号码的队友。"
+        "pass_type='short' 地面短传 / 'long' 高吊长传 / 'through' 直塞防线身后。"
     )
     target_player_id: int
     pass_type: PassType = "short"
@@ -122,7 +121,7 @@ class Shoot(Skill):
     """Shoot at the goal. Requires possession."""
     tool_name: ClassVar[str] = "shoot"
     description: ClassVar[str] = (
-        "Shoot at the opponent's goal, aiming for a target zone."
+        "朝对方球门射门，可瞄准球门的某个区域（上左/上中/上右/下左/下中/下右）。需要脚下有球。"
     )
     target_zone: ShootZone = "top_center"
 
@@ -135,7 +134,7 @@ class ReceiveBall(Skill):
     """Position to receive an incoming pass (open up body, control first touch)."""
     tool_name: ClassVar[str] = "receive_ball"
     description: ClassVar[str] = (
-        "Prepare to receive a pass — orient body, ready first touch."
+        "准备接球 —— 调整身体方向，准备第一脚处理。队友要传球给你时用。"
     )
 
 
@@ -148,7 +147,7 @@ class Mark(Skill):
     """Goalside-mark a specific opponent (stay between them and own goal)."""
     tool_name: ClassVar[str] = "mark"
     description: ClassVar[str] = (
-        "Mark a specific opponent — stay goal-side of them and shadow movement."
+        "盯防指定对手 —— 站位在他和己方球门之间，跟随其移动，断他的接球路线。"
     )
     opponent_id: int
 
@@ -158,7 +157,7 @@ class Press(Skill):
     """Aggressively close down a specific opponent (close space, force error)."""
     tool_name: ClassVar[str] = "press"
     description: ClassVar[str] = (
-        "Aggressively press an opponent — close space fast to force a mistake."
+        "上抢指定对手 —— 全速冲过去逼抢，压缩他处理球的空间，迫使失误。"
     )
     opponent_id: int
 
@@ -168,7 +167,7 @@ class Tackle(Skill):
     """Attempt a tackle on the opponent in possession (sliding or standing)."""
     tool_name: ClassVar[str] = "tackle"
     description: ClassVar[str] = (
-        "Attempt a tackle on the ball carrier in front of you."
+        "对身前的持球对手发起铲球。距离近且对方持球时用，有失败被过的风险。"
     )
 
 
@@ -182,8 +181,7 @@ class ScanBehind(Skill):
     you the next observation including entities BEHIND your facing direction."""
     tool_name: ClassVar[str] = "scan_behind"
     description: ClassVar[str] = (
-        "Glance over your shoulder. Cannot do anything else this tick, but "
-        "next observation will include what was behind you."
+        "回头扫一眼背后。这一帧不能做别的，但下一次观察里能看到原本在你身后的情况。"
     )
 
 
@@ -193,8 +191,7 @@ class Track(Skill):
     even if other entities are physically closer."""
     tool_name: ClassVar[str] = "track"
     description: ClassVar[str] = (
-        "Lock visual attention on a specific player or the ball; they stay "
-        "in your perceived state even when not nearest."
+        "锁定视觉注意力到某个特定球员或球；即使他不是最近的实体，也始终保留在你的视野里。"
     )
     entity_id: int
 
@@ -209,9 +206,8 @@ class Call(Skill):
     in range; opponents within ~10m may overhear (audience='nearby')."""
     tool_name: ClassVar[str] = "call"
     description: ClassVar[str] = (
-        "Shout to teammates: instructions, warnings, or requests "
-        "('over here', 'man on', 'switch'). "
-        "audience='team' (broadcast) or 'nearby' (only ~10m radius, opponents may overhear)."
+        "对队友喊话：指令、提醒、呼应（"传给我"、"身后有人"、"换边"之类）。"
+        "audience='team' 全场广播 / 'nearby' 只有 ~10m 内的人能听见（对手有概率偷听）。"
     )
     message: str
     audience: CallAudience = "team"
