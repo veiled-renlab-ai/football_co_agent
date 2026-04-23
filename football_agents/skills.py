@@ -206,7 +206,7 @@ class Call(Skill):
     in range; opponents within ~10m may overhear (audience='nearby')."""
     tool_name: ClassVar[str] = "call"
     description: ClassVar[str] = (
-        "对队友喊话：指令、提醒、呼应（"传给我"、"身后有人"、"换边"之类）。"
+        "对队友喊话：指令、提醒、呼应（'传给我' / '身后有人' / '换边' 之类）。"
         "audience='team' 全场广播 / 'nearby' 只有 ~10m 内的人能听见（对手有概率偷听）。"
     )
     message: str
