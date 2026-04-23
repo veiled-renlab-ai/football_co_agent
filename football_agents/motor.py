@@ -151,31 +151,19 @@ class MotorController:
         return int(obs["active"])
 
     def _self_pos_vel(self, obs: dict) -> tuple[np.ndarray, np.ndarray]:
-        team_key = f"{self.team_side}_team"
+        team_key = "left_team"
         idx = self._resolve_self_idx(obs)
         return obs[team_key][idx], obs[f"{team_key}_direction"][idx]
 
     def _has_ball(self, obs: dict) -> bool:
-        team_idx = 0 if self.team_side == "left" else 1
+        team_idx = 0
         return (
             obs["ball_owned_team"] == team_idx
             and obs["ball_owned_player"] == self._resolve_self_idx(obs)
         )
 
-    def _selfframe_target_to_abs(
-        self, target_x: float, target_y: float,
-    ) -> tuple[float, float]:
-        """LLM gives target_x/target_y in self-frame (+x = opp goal). For
-        team_b (right side), mirror both axes to absolute. Perception layer
-        does the inverse transform on world coords seen by the LLM, so the
-        contract is: LLM always thinks +x = opp goal, motor handles reality.
-        """
-        if self.team_side == "right":
-            return -target_x, -target_y
-        return target_x, target_y
-
     def _opponent_goal_x(self) -> float:
-        return 1.0 if self.team_side == "left" else -1.0
+        return 1.0
 
     # --- override me ------------------------------------------------------
 
@@ -221,8 +209,7 @@ class MoveToController(MotorController):
         self.tick_count += 1
         skill: MoveTo = self.skill  # type: ignore[assignment]
         pos, _ = self._self_pos_vel(obs)
-        # Convert LLM target from self-frame to absolute frame
-        tgt_x, tgt_y = self._selfframe_target_to_abs(skill.target_x, skill.target_y)
+        tgt_x, tgt_y = skill.target_x, skill.target_y
         dx = tgt_x - float(pos[0])
         dy = tgt_y - float(pos[1])
 
@@ -270,8 +257,7 @@ class DribbleTowardController(MotorController):
         if not self._has_ball(obs):
             return A.RELEASE_DRIBBLE, "failed"
         pos, _ = self._self_pos_vel(obs)
-        # Convert LLM target from self-frame to absolute frame
-        tgt_x, tgt_y = self._selfframe_target_to_abs(skill.target_x, skill.target_y)
+        tgt_x, tgt_y = skill.target_x, skill.target_y
         dx = tgt_x - float(pos[0])
         dy = tgt_y - float(pos[1])
 
@@ -325,7 +311,7 @@ class PassToController(MotorController):
         if not self._has_ball(obs):
             return A.IDLE, "failed"
 
-        team_key = f"{self.team_side}_team"
+        team_key = "left_team"
 
         # Tick 1: orient toward the target teammate
         if self.tick_count == 1:
@@ -366,14 +352,7 @@ class ShootController(MotorController):
         if self.tick_count == 1:
             self_pos, _ = self._self_pos_vel(obs)
             goal_x = self._opponent_goal_x()
-            # SELF-FRAME y mirror: the LLM thinks "+y = its visual down"
-            # (ShootZone "top_*" → bias = -0.04 absolute). For team_b (right
-            # side) the perception layer mirrors y, so the LLM's "top" is
-            # absolute +y. Without this sign-flip, team_b shooting "top_left"
-            # would aim at absolute -0.04 = its own visual BOTTOM. Mirror
-            # via the same sign convention used in perception/motor.
-            sign = 1 if self.team_side == "left" else -1
-            goal_y = sign * self.ZONE_Y_BIAS.get(skill.target_zone, 0.0)
+            goal_y = self.ZONE_Y_BIAS.get(skill.target_zone, 0.0)
             dx = goal_x - float(self_pos[0])
             dy = goal_y - float(self_pos[1])
             return vector_to_action(dx, dy), "in_progress"
@@ -408,7 +387,7 @@ class PressController(MotorController):
     def step(self, obs: dict) -> tuple[int, SkillStatus]:
         self.tick_count += 1
         skill: Press = self.skill  # type: ignore[assignment]
-        opp_key = "right_team" if self.team_side == "left" else "left_team"
+        opp_key = "right_team"
         try:
             opp_pos = obs[opp_key][skill.opponent_id]
         except (IndexError, KeyError):
@@ -435,22 +414,17 @@ class MarkController(MotorController):
     def step(self, obs: dict) -> tuple[int, SkillStatus]:
         self.tick_count += 1
         skill: Mark = self.skill  # type: ignore[assignment]
-        opp_key = "right_team" if self.team_side == "left" else "left_team"
+        opp_key = "right_team"
         try:
             opp_pos = obs[opp_key][skill.opponent_id]
         except (IndexError, KeyError):
             return A.IDLE, "failed"
-        own_goal_x = -1.0 if self.team_side == "left" else 1.0
+        own_goal_x = -1.0
         # Sit SHADOW_OFFSET on the our-goal side of the opponent
-        target_x = float(opp_pos[0]) + (
-            -self.SHADOW_OFFSET if self.team_side == "left" else +self.SHADOW_OFFSET
-        )
+        target_x = float(opp_pos[0]) - self.SHADOW_OFFSET
         target_y = float(opp_pos[1])
         # Don't go past our own goal line
-        if self.team_side == "left":
-            target_x = max(target_x, own_goal_x + 0.05)
-        else:
-            target_x = min(target_x, own_goal_x - 0.05)
+        target_x = max(target_x, own_goal_x + 0.05)
         self_pos, _ = self._self_pos_vel(obs)
         dx = target_x - float(self_pos[0])
         dy = target_y - float(self_pos[1])

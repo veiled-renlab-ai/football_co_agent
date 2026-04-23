@@ -147,7 +147,7 @@ class MultiAgentRunner:
     def _arm_fallback_for(self, agent: PlayerAgent) -> None:
         """Install body_rest_state_fallback for one agent. Main thread."""
         try:
-            fb_obs = agent.perceive(self.env.raw_obs, self.env.tick)
+            fb_obs = agent.perceive(self.env.raw_obs_for_slot(agent.slot), self.env.tick)
             fb_skill = self._fallback_policy(fb_obs)
         except Exception as e:
             logger.warning(
@@ -159,7 +159,7 @@ class MultiAgentRunner:
         # Fallback policy doesn't currently produce Call, but pass anyway for
         # consistency — and so future fallback variants don't silently break.
         agent.install_skill(
-            fb_skill, tick=self.env.tick, raw_obs=self.env.raw_obs,
+            fb_skill, tick=self.env.tick, raw_obs=self.env.raw_obs_for_slot(agent.slot),
         )
 
     # ---- main loop ---------------------------------------------------
@@ -177,7 +177,7 @@ class MultiAgentRunner:
         #    Startup jitter (50ms × i) spreads the initial LLM burst so 22
         #    agents don't all hit the API in the same instant on tick 0.
         for i, a in enumerate(self.agents):
-            obs = a.perceive(self.env.raw_obs, self.env.tick)
+            obs = a.perceive(self.env.raw_obs_for_slot(a.slot), self.env.tick)
             a.push_observation(obs)
             a.start()
             if i < len(self.agents) - 1:
@@ -210,7 +210,7 @@ class MultiAgentRunner:
                     # (PlayerAgent.install_skill needs them to build a Message;
                     # without them, Call silently no-ops with a logged warning).
                     a.install_skill(
-                        skill, tick=self.env.tick, raw_obs=self.env.raw_obs,
+                        skill, tick=self.env.tick, raw_obs=self.env.raw_obs_for_slot(a.slot),
                     )
                     self._decisions_completed += 1
                     log_entry = {
@@ -241,7 +241,7 @@ class MultiAgentRunner:
                 # ---- 3. Step every agent's motor controller; assemble actions ----
                 actions: list[int] = [self._IDLE_ACTION] * self.n_slots
                 for a in self.agents:
-                    action, status = a.step_motor(self.env.raw_obs)
+                    action, status = a.step_motor(self.env.raw_obs_for_slot(a.slot))
                     actions[a.slot] = action
                     if status != "in_progress":
                         # Skill finished/failed — re-arm with fallback so the
@@ -254,7 +254,7 @@ class MultiAgentRunner:
                 # ---- 5. Periodically push fresh obs to each agent's worker ----
                 for a in self.agents:
                     if self.env.tick - last_obs_push_tick[a.slot] >= self.obs_refresh_every_ticks:
-                        obs = a.perceive(self.env.raw_obs, self.env.tick)
+                        obs = a.perceive(self.env.raw_obs_for_slot(a.slot), self.env.tick)
                         a.push_observation(obs)
                         last_obs_push_tick[a.slot] = self.env.tick
 

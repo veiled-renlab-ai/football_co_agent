@@ -175,9 +175,6 @@ class EgocentricFilter:
         self.player_id = player_id
         self.team = team
         self.role = role
-        # Self-frame mirror sign: team_a uses absolute (sign=+1), team_b
-        # mirrors both axes (sign=-1) so the LLM always thinks +x = opp goal.
-        self._sign = 1 if team == "team_a" else -1
         # Default facing in self-frame: toward opponent goal = +x for ALL agents.
         self._last_facing_deg = 0.0
         # Tracked entity ids — always force-included in perceived_entities
@@ -221,24 +218,18 @@ class EgocentricFilter:
         self._scan_behind_pending = True
 
     def filter(self, god_view: dict, tick: int) -> Observation:
-        team_key = "left_team" if self.team == "team_a" else "right_team"
-        opp_key = "right_team" if self.team == "team_a" else "left_team"
-        team_idx = 0 if self.team == "team_a" else 1
-        opp_team_idx = 1 - team_idx
-
-        # SELF-FRAME conversion: every LLM thinks "+x = opponent goal".
-        # gfootball uses absolute coords (left team at -x, right at +x).
-        # For team_b (right side), we mirror BOTH axes (180° rotation) so
-        # the LLM's mental model is consistent across teams. Motor layer
-        # mirrors LLM-provided target coords back to absolute when
-        # commanding gfootball.
-        sign = 1 if self.team == "team_a" else -1
+        # gfootball already provides per-slot views: self is always at
+        # "left_team", opp at "right_team", self-team index is always 0.
+        team_key = "left_team"
+        opp_key = "right_team"
+        team_idx = 0
+        opp_team_idx = 1
 
         # ---- self ---------------------------------------------------------
         self_pos_arr = god_view[team_key][self.player_id]
         self_vel_arr = god_view[f"{team_key}_direction"][self.player_id]
-        self_pos = Vec2(sign * float(self_pos_arr[0]), sign * float(self_pos_arr[1]))
-        self_vel = Vec2(sign * float(self_vel_arr[0]), sign * float(self_vel_arr[1]))
+        self_pos = Vec2(float(self_pos_arr[0]), float(self_pos_arr[1]))
+        self_vel = Vec2(float(self_vel_arr[0]), float(self_vel_arr[1]))
 
         # Update facing if we're moving fast enough to reorient
         speed = math.hypot(self_vel.x, self_vel.y)
@@ -266,7 +257,7 @@ class EgocentricFilter:
         # ---- candidate entities ------------------------------------------
         candidates: list[tuple[float, EntityView]] = []  # (distance, view)
 
-        # Teammates (skip self) — mirror coords for team_b via _make_entity_view
+        # Teammates (skip self)
         for i, pos in enumerate(god_view[team_key]):
             if i == self.player_id:
                 continue
@@ -296,10 +287,9 @@ class EgocentricFilter:
             if ev is not None:
                 candidates.append((ev.distance, ev))
 
-        # Ball — always perceived. Mirror coords via self._sign for team_b.
+        # Ball — always perceived.
         ball_xyz = god_view["ball"]
-        ball_pos = Vec2(self._sign * float(ball_xyz[0]),
-                        self._sign * float(ball_xyz[1]))
+        ball_pos = Vec2(float(ball_xyz[0]), float(ball_xyz[1]))
         ball_dist = self_pos.distance_to(ball_pos)
         ball_dir = god_view["ball_direction"]
         candidates.append((
@@ -308,8 +298,7 @@ class EgocentricFilter:
                 entity_id=self.BALL_ENTITY_ID,
                 role="ball",
                 position=ball_pos,
-                velocity=Vec2(self._sign * float(ball_dir[0]),
-                              self._sign * float(ball_dir[1])),
+                velocity=Vec2(float(ball_dir[0]), float(ball_dir[1])),
                 distance=ball_dist,
                 in_current_fov=True,
                 has_ball=False,
@@ -339,11 +328,8 @@ class EgocentricFilter:
                         continue
                     pos = arr[tid]
                     vel = god_view[f"{tk}_direction"][tid]
-                    # Mirror to self-frame for team_b
-                    ent_pos = Vec2(self._sign * float(pos[0]),
-                                   self._sign * float(pos[1]))
-                    ent_vel = Vec2(self._sign * float(vel[0]),
-                                   self._sign * float(vel[1]))
+                    ent_pos = Vec2(float(pos[0]), float(pos[1]))
+                    ent_vel = Vec2(float(vel[0]), float(vel[1]))
                     forced = EntityView(
                         entity_id=tid,
                         role=role_label,
@@ -369,46 +355,15 @@ class EgocentricFilter:
         # Pull any Call messages this player can hear from the team bus
         # (Phase 5c). Bus is optional — single-agent demos leave it None
         # and get an empty heard_calls list.
-        #
-        # FRAME CONTRACT: the bus stores `sender_position` in ABSOLUTE
-        # coords (player_agent.py posts the raw gfootball pos). But our
-        # `self_pos` here is in SELF-FRAME (mirrored for team_b). If we
-        # passed self_pos directly, the bus would compare distances across
-        # mismatched frames — for team_b, every nearby teammate would
-        # appear ~1.0+ units away and the audience='nearby' filter would
-        # reject them all.
-        #
-        # Fix: pass the listener's ABSOLUTE position into the bus (un-mirror
-        # via self._sign), then mirror the returned HeardCall.sender_position
-        # BACK to self-frame so prompts.py can render it from the listener's
-        # POV. For team_a (sign=+1) both transforms are no-ops.
         heard: list = []
         if self._bus is not None:
             channel = "left" if self.team == "team_a" else "right"
-            listener_pos_abs = Vec2(self._sign * self_pos.x,
-                                    self._sign * self_pos.y)
-            heard_abs = self._bus.read_for(
+            heard = self._bus.read_for(
                 team=channel,
                 listener_id=self.player_id,
-                listener_position=listener_pos_abs,
+                listener_position=self_pos,
                 current_tick=tick,
             )
-            # Mirror sender_position into self-frame for the listener's
-            # display. Local import avoids the TYPE_CHECKING-only import
-            # at module top (HeardCall isn't available at runtime up there).
-            from .message_bus import HeardCall as _HeardCall
-            heard = [
-                _HeardCall(
-                    sender_player_id=h.sender_player_id,
-                    sender_jersey=h.sender_jersey,
-                    sender_position=Vec2(self._sign * h.sender_position.x,
-                                         self._sign * h.sender_position.y),
-                    message=h.message,
-                    audience=h.audience,
-                    age_ticks=h.age_ticks,
-                )
-                for h in heard_abs
-            ]
 
         return Observation(
             tick=tick,
@@ -434,10 +389,8 @@ class EgocentricFilter:
         facing_deg: float,
         has_ball: bool,
     ) -> Optional[EntityView]:
-        # Apply self-frame mirror (sign=-1 for team_b) to entity position
-        # and velocity. self_pos is already in self-frame (mirrored in filter).
-        ent_x = self._sign * float(pos[0])
-        ent_y = self._sign * float(pos[1])
+        ent_x = float(pos[0])
+        ent_y = float(pos[1])
         dx = ent_x - self_pos.x
         dy = ent_y - self_pos.y
         distance = math.hypot(dx, dy)
@@ -455,8 +408,7 @@ class EgocentricFilter:
         # Within FULL radius: full info incl. velocity. Beyond: position only.
         velocity = None
         if distance <= SIGHT_DISTANCE_FULL:
-            velocity = Vec2(self._sign * float(vel[0]),
-                            self._sign * float(vel[1]))
+            velocity = Vec2(float(vel[0]), float(vel[1]))
 
         return EntityView(
             entity_id=entity_id,
