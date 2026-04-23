@@ -178,13 +178,18 @@ class MotorController:
 class MoveToController(MotorController):
     """Walk / jog / sprint toward (target_x, target_y).
 
-    Urgency mapping:
-      - sprint: press SPRINT once at tick 1, then send direction every tick
-      - jog:    send direction every tick (gfootball base speed, no SPRINT)
-      - walk:   throttled cycle — direction → release → idle×4 → repeat
-                (~17% jog speed; brief push, then full momentum-decay pause
-                before next push; gives a deliberate "step, pause, step,
-                pause" walking feel during LLM thinking gaps)
+    Urgency mapping (handled at tick 1 — explicit SPRINT or RELEASE_SPRINT
+    so sticky state is correctly cleared between skill switches):
+      - sprint: press SPRINT at tick 1, direction every tick after
+      - jog:    press RELEASE_SPRINT at tick 1 (clears any leftover sticky
+                from a previous sprint skill), direction every tick after
+      - walk:   press RELEASE_SPRINT at tick 1, then throttled cycle —
+                direction → release → idle×4 → repeat (~17% jog speed)
+
+    BUG FIX (2026-04): jog used to fall through tick 1 without releasing
+    SPRINT, so a "jog" right after a "sprint" stayed at sprint speed
+    (sticky persists until RELEASE_SPRINT). Now urgency is explicitly
+    enforced on every skill installation.
 
     On arrival: stay 'in_progress' with IDLE so sticky direction carries
     the player past the target naturally. Real players don't slam-stop when
@@ -202,17 +207,19 @@ class MoveToController(MotorController):
         dx = skill.target_x - float(pos[0])
         dy = skill.target_y - float(pos[1])
 
-        # Sprint kickoff
-        if skill.urgency == "sprint" and self.tick_count == 1:
-            return A.SPRINT, "in_progress"
+        # Tick 1: enforce sprint state per urgency.
+        if self.tick_count == 1:
+            if skill.urgency == "sprint":
+                return A.SPRINT, "in_progress"
+            return A.RELEASE_SPRINT, "in_progress"
 
         # Arrived — stop pushing direction, sticky carries us
         if math.hypot(dx, dy) < self.EPSILON:
             return A.IDLE, "in_progress"
 
-        # Walk throttle — see _WALK_CYCLE_LEN docstring above
+        # Walk throttle — cycle starts at tick 2 (since tick 1 was RELEASE_SPRINT)
         if skill.urgency == "walk":
-            phase = (self.tick_count - 1) % self._WALK_CYCLE_LEN
+            phase = (self.tick_count - 2) % self._WALK_CYCLE_LEN
             if phase == 1:
                 return A.RELEASE_DIRECTION, "in_progress"
             if phase >= 2:
@@ -228,9 +235,19 @@ class DribbleTowardController(MotorController):
     Only failure case is loss of possession (-> 'failed', async runner
     swaps to fallback that picks a no-ball skill).
 
-    Walk urgency: same throttling pattern as MoveToController. DRIBBLE
-    sticky is independent of movement direction sticky, so we can release
-    direction without losing the dribble stance.
+    Two-tick setup before motion:
+      tick 1: DRIBBLE      (enable shielding-stance sticky)
+      tick 2: SPRINT or RELEASE_SPRINT per urgency
+      tick 3+: direction (with walk-throttle cycle if walk urgency)
+
+    DRIBBLE and SPRINT are INDEPENDENT sticky flags in gfootball — pressing
+    SPRINT does NOT release DRIBBLE. So a sprinting dribble = both sticky
+    flags on simultaneously, which gives top-speed ball-shielded run.
+
+    BUG FIX (2026-04): previously this controller never pressed SPRINT
+    regardless of urgency. So `DribbleToward(urgency="sprint")` actually
+    moved at jog speed. Fixed by adding explicit SPRINT/RELEASE_SPRINT
+    at tick 2, mirroring MoveToController's tick-1 logic.
     """
 
     _WALK_CYCLE_LEN = 6
@@ -244,17 +261,27 @@ class DribbleTowardController(MotorController):
         dx = skill.target_x - pos[0]
         dy = skill.target_y - pos[1]
 
-        # Tick 1: enable DRIBBLE sticky (independent of movement)
+        # Tick 1: enable DRIBBLE sticky (shielding stance)
         if self.tick_count == 1:
             return A.DRIBBLE, "in_progress"
+
+        # Tick 2: set sprint state per urgency (independent of DRIBBLE).
+        # Critical: explicit RELEASE_SPRINT for non-sprint to clear any
+        # leftover sticky from a previous skill (e.g., MoveTo(sprint)
+        # immediately followed by DribbleToward(jog) would otherwise stay
+        # at sprint speed because SPRINT sticky persists across skills).
+        if self.tick_count == 2:
+            if skill.urgency == "sprint":
+                return A.SPRINT, "in_progress"
+            return A.RELEASE_SPRINT, "in_progress"
 
         # Arrived — sticky direction carries us
         if math.hypot(dx, dy) < self.EPSILON:
             return A.IDLE, "in_progress"
 
-        # Walk throttle (cycle starts at tick 2 since tick 1 was DRIBBLE)
+        # Walk throttle — cycle starts at tick 3 (after DRIBBLE + sprint setup)
         if skill.urgency == "walk":
-            phase = (self.tick_count - 2) % self._WALK_CYCLE_LEN
+            phase = (self.tick_count - 3) % self._WALK_CYCLE_LEN
             if phase == 1:
                 return A.RELEASE_DIRECTION, "in_progress"
             if phase >= 2:
