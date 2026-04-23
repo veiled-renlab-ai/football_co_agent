@@ -28,7 +28,8 @@
       "Bash(wsl.exe -d Ubuntu-22.04 -- bash -lc 'source ~/football-env/bin/activate && cd /mnt/c/Users/dfgfd/Desktop/football && rm -rf replays && python3 scripts/demo_with_video.py 2>&1')",
       "Bash(wsl.exe -d Ubuntu-22.04 -- bash -lc 'source ~/football-env/bin/activate && python -c \"import gfootball; print\\(gfootball.__file__\\)\"')",
       "Bash(wsl.exe -d Ubuntu-22.04 -- bash -lc 'source ~/football-env/bin/activate && python -c \"import gfootball; import os; print\\(os.path.dirname\\(gfootball.__file__\\)\\)\"')",
-      "Bash(wsl.exe -d *)"
+      "Bash(wsl.exe -d *)",
+      "Bash(wsl -d Ubuntu-22.04 -- bash -lc 'source ~/football-env/bin/activate && cd /mnt/c/Users/dfgfd/Desktop/football && python3 -u scripts/demo_render_3d.py 2>&1 | tee /mnt/c/Users/dfgfd/Desktop/football/logs/run.log')"
     ]
   }
 }

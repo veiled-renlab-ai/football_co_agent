@@ -13,9 +13,10 @@ from .llm_client import LLMClient, LLMDecision
 from .perception import Observation
 from .prompts import DEFAULT_PERSONA, PlayerPersona, build_system_prompt, render_observation
 from .skills import (
-    ALL_SKILLS, SKILLS_BY_NAME, Call, DribbleToward, HoldPosition, Mark, MoveTo,
-    PassTo, Press, ReceiveBall, ScanBehind, Shoot, Skill, Tackle, Track,
-    skill_to_tool_schema,
+    ALL_SKILLS, CATEGORY_TOOL_NAMES, SKILLS_BY_NAME, Call, DribbleToward,
+    HoldPosition, Mark, MoveTo, PassTo, Press, ReceiveBall, ScanBehind,
+    Shoot, Skill, Tackle, Track, layer_1_category_tools, skill_to_tool_schema,
+    skills_in_category,
 )
 
 
@@ -107,40 +108,91 @@ class LLMPlayer:
 
         # Per-turn dynamic tool filtering — only physically possible actions.
         valid_skill_classes = self._valid_skills_for(observation)
-        valid_tools = [skill_to_tool_schema(c) for c in valid_skill_classes]
+        valid_set = set(valid_skill_classes)
+
+        # ---- Stage 1: progressive disclosure — pick a category ----
+        # Only categories that contain at least one currently-valid skill.
+        valid_categories = sorted({
+            c for s, c in __import__("football_agents.skills", fromlist=["SKILL_CATEGORY"]).SKILL_CATEGORY.items()
+            if s in valid_set
+        })
+        layer_1_tools = [
+            t for t in layer_1_category_tools()
+            if CATEGORY_TOOL_NAMES[t["function"]["name"]] in valid_categories
+        ]
 
         try:
-            decision = self.llm_client.choose_tool(
+            stage1 = self.llm_client.choose_tool(
                 system_prompt=self._system_prompt,
                 user_message=obs_text,
-                tools=valid_tools,
+                tools=layer_1_tools,
             )
         except Exception as e:
-            log_entry.error = f"llm_call_failed: {e!r}"
+            log_entry.error = f"llm_stage1_failed: {e!r}"
             log_entry.skill = HoldPosition()
             self.history.append(log_entry)
-            logger.warning("LLM call failed for player %s: %s", self.player_id, e)
+            logger.warning("LLM stage-1 failed for player %s: %s", self.player_id, e)
             return log_entry.skill
 
-        log_entry.reasoning = decision.reasoning
-        log_entry.tool_name = decision.tool_name
-        log_entry.tool_args = decision.tool_args
-
-        skill_cls = SKILLS_BY_NAME.get(decision.tool_name)
-        if skill_cls is None:
-            log_entry.error = f"unknown_skill: {decision.tool_name!r}"
+        category = CATEGORY_TOOL_NAMES.get(stage1.tool_name)
+        if category is None:
+            log_entry.error = f"unknown_category: {stage1.tool_name!r}"
             log_entry.skill = HoldPosition()
             self.history.append(log_entry)
-            logger.warning("Unknown skill %r from LLM; fallback to HoldPosition", decision.tool_name)
+            logger.warning("Unknown category %r from stage-1", stage1.tool_name)
+            return log_entry.skill
+
+        # ---- Stage 2: pick a specific skill within that category ----
+        cat_skills = [s for s in skills_in_category(category) if s in valid_set]
+        if not cat_skills:
+            log_entry.error = f"no_valid_skills_in_category: {category}"
+            log_entry.skill = HoldPosition()
+            self.history.append(log_entry)
+            return log_entry.skill
+
+        stage2_tools = [skill_to_tool_schema(c) for c in cat_skills]
+        # Tiny addendum so LLM knows it already committed to the category.
+        # NOT a behavior rule — just continuity between the two API calls.
+        stage2_msg = obs_text + f"\n\n(你刚才决定要做 {category} 类动作；现在从这类的具体动作里选一个。)"
+
+        try:
+            stage2 = self.llm_client.choose_tool(
+                system_prompt=self._system_prompt,
+                user_message=stage2_msg,
+                tools=stage2_tools,
+            )
+        except Exception as e:
+            log_entry.error = f"llm_stage2_failed: {e!r}"
+            log_entry.skill = HoldPosition()
+            self.history.append(log_entry)
+            logger.warning("LLM stage-2 failed for player %s: %s", self.player_id, e)
+            return log_entry.skill
+
+        # Combine reasoning from both stages for the visible log
+        combined_reasoning_parts = []
+        if stage1.reasoning:
+            combined_reasoning_parts.append(f"[{category}] {stage1.reasoning}")
+        if stage2.reasoning:
+            combined_reasoning_parts.append(stage2.reasoning)
+        log_entry.reasoning = " // ".join(combined_reasoning_parts)
+        log_entry.tool_name = stage2.tool_name
+        log_entry.tool_args = stage2.tool_args
+
+        skill_cls = SKILLS_BY_NAME.get(stage2.tool_name)
+        if skill_cls is None:
+            log_entry.error = f"unknown_skill: {stage2.tool_name!r}"
+            log_entry.skill = HoldPosition()
+            self.history.append(log_entry)
+            logger.warning("Unknown skill %r from stage-2; fallback HoldPosition", stage2.tool_name)
             return log_entry.skill
 
         try:
-            skill = skill_cls(**decision.tool_args)
+            skill = skill_cls(**stage2.tool_args)
         except TypeError as e:
             log_entry.error = f"bad_args: {e!r}"
             log_entry.skill = HoldPosition()
             self.history.append(log_entry)
-            logger.warning("Bad args for %s: %s", decision.tool_name, e)
+            logger.warning("Bad args for %s: %s", stage2.tool_name, e)
             return log_entry.skill
 
         log_entry.skill = skill

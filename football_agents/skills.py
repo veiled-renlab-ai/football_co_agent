@@ -233,6 +233,77 @@ SKILLS_BY_NAME: dict[str, type[Skill]] = {s.tool_name: s for s in ALL_SKILLS}
 
 
 # ---------------------------------------------------------------------------
+# Progressive disclosure — Skill categories (Claude-Skills style)
+# ---------------------------------------------------------------------------
+# Layer 1 sends only 5 category meta-tools (no args). Layer 2 (after LLM
+# picks a category) sends only that category's actual skill schemas.
+# Smaller per-call payload → faster decisions, less GLM-4.7 truncation.
+
+SKILL_CATEGORY: dict[type[Skill], str] = {
+    # MOVE: positional / off-ball running
+    MoveTo: "MOVE",
+    HoldPosition: "MOVE",
+    ReceiveBall: "MOVE",
+    # ATTACK: on-ball offense
+    DribbleToward: "ATTACK",
+    PassTo: "ATTACK",
+    Shoot: "ATTACK",
+    # DEFEND: disrupt opposing possession
+    Mark: "DEFEND",
+    Press: "DEFEND",
+    Tackle: "DEFEND",
+    # PERCEIVE: gather info (head check / focus)
+    ScanBehind: "PERCEIVE",
+    Track: "PERCEIVE",
+    # COMMUNICATE: shout to teammates
+    Call: "COMMUNICATE",
+}
+
+CATEGORY_DESCRIPTIONS: dict[str, str] = {
+    "ATTACK": "进攻类动作（射门 / 带球突破 / 传球）。脚下有球或即将拿到球，要往对方半场施压时选。",
+    "DEFEND": "防守类动作（盯人 / 上抢 / 铲球）。对方持球或我方刚失球，要干扰对手时选。",
+    "MOVE": "跑位类动作（跑到某点 / 站位不动 / 准备接球）。无球时调整位置或保持阵型时选。",
+    "PERCEIVE": "感知类动作（回头观察 / 锁定关注某球员）。需要先看清场上情况再决定时选。",
+    "COMMUNICATE": "沟通类动作（喊话呼应队友）。需要给队友发指令或信号时选（多 agent 时才有效）。",
+}
+
+# Reverse mapping: tool_name → category
+CATEGORY_TOOL_NAMES: dict[str, str] = {
+    f"choose_{cat.lower()}": cat for cat in CATEGORY_DESCRIPTIONS
+}
+
+
+def layer_1_category_tools() -> list[dict[str, Any]]:
+    """Return the 5 category meta-tools — no params, one-line descriptions.
+
+    LLM picks one of these in stage-1 to declare its intent category. Then
+    we send only that category's actual skill schemas in stage-2.
+    """
+    out: list[dict[str, Any]] = []
+    for cat, desc in CATEGORY_DESCRIPTIONS.items():
+        out.append({
+            "type": "function",
+            "function": {
+                "name": f"choose_{cat.lower()}",
+                "description": desc,
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+            },
+        })
+    return out
+
+
+def skills_in_category(category: str) -> list[type[Skill]]:
+    """All Skill classes belonging to the given category."""
+    return [s for s, c in SKILL_CATEGORY.items() if c == category]
+
+
+# ---------------------------------------------------------------------------
 # OpenAI / 火山 / MiniMax tool-schema export
 # ---------------------------------------------------------------------------
 
