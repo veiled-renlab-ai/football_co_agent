@@ -25,8 +25,8 @@ def main():
 
     # System prompt for 王浩 should contain BOTH new sections
     sp = build_system_prompt(TEAM_BLUE_5V5[1])  # 王浩 RM
-    assert "球场守则（所有球员通用）" in sp, "missing universal section"
-    assert "离球最近的是不是我" in sp, "universal text missing"
+    assert "我对足球的理解" in sp, "missing universal section"
+    assert "球队像一张网" in sp, "universal text missing"
     assert "我的位置职责（右前卫）" in sp, "missing position section"
     assert "我守右路宽度" in sp, "RM discipline text missing"
     assert "我们球队（蓝队）的风格" in sp, "team section regression"
