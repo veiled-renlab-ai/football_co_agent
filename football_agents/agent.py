@@ -52,7 +52,7 @@ class LLMPlayer:
 
     # 3-tier memory:
     #   - last X turns: kept VERBATIM (full message exchange)
-    #   - turns X+1..Y: compressed to 1-line summaries ("choose_attack → shoot(top_center)")
+    #   - turns X+1..Y: compressed to 1-line summaries ("shoot(top_center)")
     #   - older than Y: dropped
     MAX_RECENT_TURNS: int = 3
     MAX_TOTAL_TURNS: int = 8   # so compressed-zone holds (8-3)=5 summaries
@@ -192,9 +192,24 @@ class LLMPlayer:
             logger.warning("LLM call failed for player %s: %s", self.player_id, e)
             return log_entry.skill
 
-        # Parse: tool_args = {"skill_name": "shoot", "args": {"target_zone": ...}}
-        skill_name = decision.tool_args.get("skill_name")
-        args = decision.tool_args.get("args", {})
+        # Two accepted response shapes (model-dependent):
+        #   (A) invoke_skill meta-tool:
+        #         tool_name = "invoke_skill"
+        #         tool_args = {"skill_name": "shoot", "args": {"target_zone": "..."}}
+        #       GLM-4.7 / doubao-seed-1.6 follow this — the enum on skill_name
+        #       acts as a strict gate.
+        #   (B) direct skill call (tool hallucinated by strict coder models):
+        #         tool_name = "shoot"
+        #         tool_args = {"target_zone": "..."}
+        #       doubao-seed-2-0-code-250915 ignores the meta-tool wrapper and
+        #       calls the skill directly by name. Accept this too so the
+        #       coder-optimized model stays usable.
+        if decision.tool_name == "invoke_skill":
+            skill_name = decision.tool_args.get("skill_name")
+            args = decision.tool_args.get("args", {})
+        else:
+            skill_name = decision.tool_name
+            args = decision.tool_args
         if not isinstance(args, dict):
             args = {}
 

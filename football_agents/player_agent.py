@@ -134,6 +134,12 @@ class PlayerAgent:
         self.last_skill_name: Optional[str] = None
         self.last_skill_status: Optional[SkillStatus] = None
 
+        # Most recent LLM-chosen Skill (not fallback). Used by fallback layer
+        # to respect short-window "LLM just said X" — prevents fallback from
+        # undoing an intent the LLM picked <2s ago. None = no LLM decision yet.
+        self.last_llm_skill: Optional[Skill] = None
+        self.last_llm_tick: Optional[int] = None
+
         # Worker thread channels (per-agent, isolated).
         self.obs_queue: "Queue[Observation]" = Queue(maxsize=1)
         self.skill_queue: "Queue[tuple[Skill, float, int]]" = Queue(maxsize=1)
@@ -162,6 +168,7 @@ class PlayerAgent:
         *,
         tick: Optional[int] = None,
         raw_obs: Optional[dict] = None,
+        from_llm: bool = True,
     ) -> None:
         """Replace current motor controller with one for the given skill.
 
@@ -209,6 +216,13 @@ class PlayerAgent:
                 position from raw_obs[team_key][player_id]). Defaults to
                 None for backward compatibility.
         """
+        # Record the LLM's most recent intent (not fallbacks). Fallback
+        # layer reads this via get_recent_llm_intent() to avoid immediately
+        # undoing a skill the LLM just chose.
+        if from_llm and tick is not None:
+            self.last_llm_skill = skill
+            self.last_llm_tick = tick
+
         # Side-effect dispatch — applies regardless of whether we replace
         # the motor controller below.
         if isinstance(skill, Track):
@@ -307,6 +321,22 @@ class PlayerAgent:
         action, status = self.current_controller.step(raw_obs)
         self.last_skill_status = status
         return action, status
+
+    def get_recent_llm_intent(
+        self, current_tick: int, window_ticks: int = 100
+    ) -> Optional[tuple[Skill, int]]:
+        """Return (skill, installed_tick) if the LLM made a decision within
+        the last `window_ticks` env ticks, else None.
+
+        Default window 100 ticks = ~2s at 50 ticks/sec — long enough for
+        fallback to respect a fresh LLM intent, short enough that stale
+        intents don't override current priorities.
+        """
+        if self.last_llm_skill is None or self.last_llm_tick is None:
+            return None
+        if current_tick - self.last_llm_tick > window_ticks:
+            return None
+        return (self.last_llm_skill, self.last_llm_tick)
 
     def push_observation(self, obs: Observation) -> None:
         """Send a fresh observation to this agent's worker thread.

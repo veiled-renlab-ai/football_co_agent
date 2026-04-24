@@ -106,6 +106,11 @@ class Observation:
     match_clock: str                        # "23:15"
     score: tuple[int, int]                  # (team_a, team_b)
     self_state: SelfState
+    # gfootball game_mode (0=Normal, 1=KickOff, 2=GoalKick, 3=FreeKick,
+    # 4=Corner, 5=ThrowIn, 6=Penalty). Used by fallback layer to freeze
+    # motion during non-normal play so players don't wander during set
+    # pieces. Default 0 if upstream didn't supply (old callers, tests).
+    game_mode: int = 0
     perceived_entities: list[EntityView] = field(default_factory=list)
     recent_events: list[RecentEvent] = field(default_factory=list)
     last_skill: Optional[str] = None
@@ -370,6 +375,7 @@ class EgocentricFilter:
             match_clock=self._format_clock(tick),
             score=(int(score[0]), int(score[1])),
             self_state=self_state,
+            game_mode=int(god_view.get("game_mode", 0)),
             perceived_entities=perceived,
             heard_calls=heard,
         )

@@ -1,9 +1,15 @@
 """LLM client — wraps the `openai` Python SDK to talk to OpenAI-compatible
-endpoints (火山方舟 / MiniMax / DeepSeek / OpenAI).
+endpoints (阿里云百炼 Token Plan / 火山方舟 / MiniMax / DeepSeek / OpenAI).
 
 Provider is selected by the LLM_PROVIDER env var. All providers expose the
 same OpenAI-style chat-completions + tool-use API, so the rest of the codebase
 stays provider-agnostic.
+
+Key rotation: a provider may configure N API keys (comma-separated). The
+client holds one OpenAI instance per key and rotates round-robin per call
+to raise effective RPM past a single key's rate limit. Rotation is
+thread-safe so multiple PlayerAgent worker threads sharing one LLMClient
+still get balanced key use.
 
 Failure mode: if the LLM call fails or returns no tool call, we surface the
 exception to the caller — `LLMPlayer` decides how to fall back (typically
@@ -14,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -35,41 +42,107 @@ class LLMDecision:
     raw_message: Optional[Any] = None
 
 
+def _parse_key_list(raw: str) -> list[str]:
+    """Split a comma-separated env var into a list of non-empty API keys."""
+    return [k.strip() for k in raw.split(",") if k.strip()]
+
+
 class LLMClient:
-    """Thin OpenAI-compatible chat client with tool-use."""
+    """Thin OpenAI-compatible chat client with tool-use + multi-key rotation."""
 
     def __init__(
         self,
         *,
-        api_key: str,
+        api_keys: list[str],
         base_url: str,
         model: str,
         timeout_s: float = 30.0,
+        extra_body: Optional[dict[str, Any]] = None,
     ) -> None:
-        if not api_key:
-            raise RuntimeError("LLM api_key is empty — check .env")
+        if not api_keys:
+            raise RuntimeError("LLM api_keys list is empty — check .env")
         self.model = model
         self.base_url = base_url
-        self._client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout_s)
+        # One SDK client per key. Rotation happens in _pick_client().
+        self._clients = [
+            OpenAI(api_key=k, base_url=base_url, timeout=timeout_s)
+            for k in api_keys
+        ]
+        self._next_idx = 0
+        self._lock = threading.Lock()
+        # Provider-specific body fragments merged into every request. For
+        # 火山方舟 this carries {"thinking": {"type": "disabled"}} to turn
+        # off doubao's extended-thinking (≈3x faster); aliyun Token Plan
+        # defaults to empty (qwen3 non-thinking by default).
+        self._extra_body = extra_body or {}
+
+    @property
+    def n_keys(self) -> int:
+        return len(self._clients)
+
+    def _pick_client(self) -> OpenAI:
+        """Thread-safe round-robin pick across the configured API keys."""
+        with self._lock:
+            client = self._clients[self._next_idx]
+            self._next_idx = (self._next_idx + 1) % len(self._clients)
+        return client
 
     # ---- factory --------------------------------------------------------
 
     @classmethod
     def from_env(cls) -> "LLMClient":
-        provider = os.getenv("LLM_PROVIDER", "volcengine").lower()
-        if provider == "volcengine":
+        """Build an LLMClient from env vars.
+
+        LLM_PROVIDER selects the provider; each provider pulls its own
+        KEY / BASE_URL / MODEL env vars. Default: aliyun_token_plan.
+
+        Multi-key (aliyun_token_plan): ALIYUN_TOKEN_PLAN_API_KEYS is a
+        comma-separated list of `pt-...` keys. The client rotates through
+        them per request to multiply the effective rate limit.
+        """
+        provider = os.getenv("LLM_PROVIDER", "aliyun_token_plan").lower()
+        if provider == "aliyun_token_plan":
+            # Aliyun 百炼 Token Plan 团队版 — OpenAI-compatible endpoint.
+            # Supported models: qwen3.6-plus, glm-5, MiniMax-M2.5, deepseek-v3.2
+            keys = _parse_key_list(os.getenv("ALIYUN_TOKEN_PLAN_API_KEYS", ""))
+            if not keys:
+                # Fall back to single-key env var for backward compat
+                single = os.getenv("ALIYUN_TOKEN_PLAN_API_KEY", "")
+                if single:
+                    keys = [single]
             return cls(
-                api_key=os.getenv("VOLCENGINE_API_KEY", ""),
-                base_url=os.getenv("VOLCENGINE_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3"),
+                api_keys=keys,
+                base_url=os.getenv(
+                    "ALIYUN_TOKEN_PLAN_BASE_URL",
+                    "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+                ),
+                model=os.getenv("ALIYUN_TOKEN_PLAN_MODEL", "qwen3.6-plus"),
+                # qwen3 is non-thinking by default, no extra toggle needed
+                extra_body=None,
+            )
+        if provider == "volcengine":
+            key = os.getenv("VOLCENGINE_API_KEY", "")
+            return cls(
+                api_keys=[key] if key else [],
+                base_url=os.getenv(
+                    "VOLCENGINE_BASE_URL",
+                    "https://ark.cn-beijing.volces.com/api/coding/v3",
+                ),
                 model=os.getenv("VOLCENGINE_MODEL", "doubao-seed-2-0-lite-260215"),
+                # doubao-seed defaults to extended thinking; disable for speed
+                extra_body={"thinking": {"type": "disabled"}},
             )
         if provider == "minimax":
+            key = os.getenv("MINIMAX_API_KEY", "")
             return cls(
-                api_key=os.getenv("MINIMAX_API_KEY", ""),
+                api_keys=[key] if key else [],
                 base_url=os.getenv("MINIMAX_BASE_URL", "https://api.minimaxi.com/v1"),
                 model=os.getenv("MINIMAX_MODEL", "MiniMax-M1"),
             )
-        raise ValueError(f"Unknown LLM_PROVIDER={provider!r}; expected volcengine|minimax")
+        raise ValueError(
+            f"Unknown LLM_PROVIDER={provider!r}; "
+            f"expected aliyun_token_plan|volcengine|minimax"
+        )
 
     # ---- main call ------------------------------------------------------
 
@@ -146,15 +219,18 @@ class LLMClient:
         Returns LLMDecision (parses first tool_call) and includes the raw
         assistant message via .raw_message so caller can append to history.
         """
-        response = self._client.chat.completions.create(
+        client = self._pick_client()
+        create_kwargs: dict[str, Any] = dict(
             model=self.model,
             messages=messages,
             tools=tools,
             tool_choice="auto",
             temperature=temperature,
             max_tokens=max_tokens,
-            extra_body={"thinking": {"type": "disabled"}},
         )
+        if self._extra_body:
+            create_kwargs["extra_body"] = self._extra_body
+        response = client.chat.completions.create(**create_kwargs)
         msg = response.choices[0].message
         reasoning = (msg.content or "").strip()
 

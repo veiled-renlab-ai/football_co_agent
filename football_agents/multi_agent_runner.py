@@ -34,6 +34,7 @@ import time
 from typing import Callable, Optional
 
 from .env import FootballEnvAdapter
+from .fallbacks import FallbackContext, get_fallback
 from .perception import Observation
 from .player_agent import PlayerAgent
 from .skills import DribbleToward, HoldPosition, MoveTo, Skill
@@ -180,7 +181,10 @@ class MultiAgentRunner:
         self.env = env
         self.agents = agents
         self.n_slots = n_total
-        self._fallback_policy = fallback_policy or body_rest_state_fallback
+        # Legacy override: pre-per-persona demos passed a global fallback.
+        # When set, it short-circuits the per-persona registry in _arm_fallback_for.
+        # New demos should leave this None so each agent gets its own fallback.
+        self._legacy_fallback_policy = fallback_policy
         self.obs_refresh_every_ticks = obs_refresh_every_ticks
         self.max_decisions_total = max_decisions_total
         self.max_wall_seconds = max_wall_seconds
@@ -196,21 +200,47 @@ class MultiAgentRunner:
     # ---- per-agent helpers -------------------------------------------
 
     def _arm_fallback_for(self, agent: PlayerAgent) -> None:
-        """Install body_rest_state_fallback for one agent. Main thread."""
+        """Install the per-persona fallback for one agent. Main thread.
+
+        Per-player fallbacks live in football_agents/fallbacks/ and are
+        resolved via get_fallback(persona). The shared-guard pipeline
+        (game_mode / ball-invisible / recent-LLM-intent / stamina) is
+        already wrapped around each registered function.
+
+        Legacy override: if the runner was constructed with an explicit
+        fallback_policy (old Callable[[Observation], Skill] signature),
+        that function is applied to ALL agents instead — backward compat
+        for demos that pre-date the per-persona registry.
+        """
         try:
-            fb_obs = agent.perceive(self.env.raw_obs_for_slot(agent.slot), self.env.tick)
-            fb_skill = self._fallback_policy(fb_obs)
+            raw = self.env.raw_obs_for_slot(agent.slot)
+            fb_obs = agent.perceive(raw, self.env.tick)
+            if self._legacy_fallback_policy is not None:
+                fb_skill = self._legacy_fallback_policy(fb_obs)
+            else:
+                ctx = FallbackContext(
+                    persona=agent.persona,
+                    obs=fb_obs,
+                    recent_llm_intent=agent.get_recent_llm_intent(
+                        current_tick=self.env.tick, window_ticks=100,
+                    ),
+                )
+                fallback_fn = get_fallback(agent.persona)
+                fb_skill = fallback_fn(ctx)
         except Exception as e:
             logger.warning(
                 "agent[pid=%d] fallback raised: %s; using HoldPosition",
                 agent.player_id, e,
             )
             fb_skill = HoldPosition()
-        # Pass tick + raw_obs so Call (if ever in fallback) can post to bus.
-        # Fallback policy doesn't currently produce Call, but pass anyway for
-        # consistency — and so future fallback variants don't silently break.
+        # Pass from_llm=False so PlayerAgent does NOT update last_llm_intent
+        # (the fallback's own choice shouldn't masquerade as an LLM decision
+        # and then veto later fallbacks via the shared guard).
         agent.install_skill(
-            fb_skill, tick=self.env.tick, raw_obs=self.env.raw_obs_for_slot(agent.slot),
+            fb_skill,
+            tick=self.env.tick,
+            raw_obs=self.env.raw_obs_for_slot(agent.slot),
+            from_llm=False,
         )
 
     # ---- main loop ---------------------------------------------------
@@ -260,8 +290,13 @@ class MultiAgentRunner:
                     # Pass tick + raw_obs so Call skills can post to TeamMessageBus
                     # (PlayerAgent.install_skill needs them to build a Message;
                     # without them, Call silently no-ops with a logged warning).
+                    # from_llm=True updates the recent-LLM-intent so the next
+                    # fallback invocation defers to this decision for ~2s.
                     a.install_skill(
-                        skill, tick=self.env.tick, raw_obs=self.env.raw_obs_for_slot(a.slot),
+                        skill,
+                        tick=self.env.tick,
+                        raw_obs=self.env.raw_obs_for_slot(a.slot),
+                        from_llm=True,
                     )
                     self._decisions_completed += 1
                     log_entry = {
