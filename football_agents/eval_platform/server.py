@@ -102,6 +102,16 @@ class RunCreate(BaseModel):
         description="Render gfootball 3D scene (EGL off-screen when DISPLAY unset). "
                     "Required for the live video stream in the UI.",
     )
+    stop_world_mode: bool = Field(
+        False,
+        description="Pause env while all agents decide; resume after all respond. "
+                    "Agents see a stable world snapshot — no stale-obs problem. "
+                    "Tradeoff: match pace = slowest agent's LLM latency.",
+    )
+    stop_world_timeout: float = Field(
+        8.0, ge=1.0, le=60.0,
+        description="Seconds to wait per decision cycle before timing out laggard agents.",
+    )
 
 
 # Map run_id -> active MultiAgentRunner so the stop endpoint can request it.
@@ -128,6 +138,8 @@ def _run_in_background(run_id: str, body: RunCreate, loop: asyncio.AbstractEvent
         tick_stream_every_ticks=body.tick_stream_every_ticks,
         frame_stream_every_ticks=body.frame_stream_every_ticks,
         render=body.render,
+        stop_world_mode=body.stop_world_mode,
+        stop_world_timeout=body.stop_world_timeout,
     )
 
     meta: dict[str, Any] = {
@@ -142,6 +154,8 @@ def _run_in_background(run_id: str, body: RunCreate, loop: asyncio.AbstractEvent
             "tick_stream_every_ticks": body.tick_stream_every_ticks,
             "frame_stream_every_ticks": body.frame_stream_every_ticks,
             "render": body.render,
+            "stop_world_mode": body.stop_world_mode,
+            "stop_world_timeout": body.stop_world_timeout,
         },
         "n_episodes": body.n_episodes,
         "completed_episodes": 0,

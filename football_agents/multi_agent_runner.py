@@ -150,6 +150,8 @@ class MultiAgentRunner:
         frame_stream_every_ticks: int = 3,
         on_status: Optional[Callable[[str, dict], None]] = None,
         kickoff_wait_seconds: float = 8.0,
+        stop_world_mode: bool = False,
+        stop_world_timeout: float = 8.0,
     ) -> None:
         """
         Game-time pace is controlled by gfootball's `physics_steps_per_frame`
@@ -218,6 +220,9 @@ class MultiAgentRunner:
         self._decisions_completed: int = 0
         self._decision_log: list[dict] = []
         self._stop_flag = threading.Event()
+        # Stop-world mode: pause env.step while all agents decide, then execute K ticks.
+        self.stop_world_mode = stop_world_mode
+        self._stop_world_timeout = max(1.0, float(stop_world_timeout))
 
     def request_stop(self) -> None:
         """External signal to break out of the run loop on the next tick.
@@ -267,6 +272,40 @@ class MultiAgentRunner:
         # Pass from_llm=False so PlayerAgent does NOT update last_llm_intent
         # (the fallback's own choice shouldn't masquerade as an LLM decision
         # and then veto later fallbacks via the shared guard).
+        agent.install_skill(
+            fb_skill,
+            tick=self.env.tick,
+            raw_obs=self.env.raw_obs_for_slot(agent.slot),
+            from_llm=False,
+        )
+
+    def _arm_fallback_for_stop_world(self, agent: PlayerAgent) -> None:
+        """Arm fallback in stop-world mode with recent_llm_intent=None (blocker #1 fix).
+
+        During freeze, env.tick does NOT advance, so the 100-tick guard on
+        recent_llm_intent never expires → fallback would keep re-installing the
+        last LLM skill forever. Passing None forces the position-based fallback
+        to run instead.
+        """
+        try:
+            raw = self.env.raw_obs_for_slot(agent.slot)
+            fb_obs = agent.perceive(raw, self.env.tick)
+            if self._legacy_fallback_policy is not None:
+                fb_skill = self._legacy_fallback_policy(fb_obs)
+            else:
+                ctx = FallbackContext(
+                    persona=agent.persona,
+                    obs=fb_obs,
+                    recent_llm_intent=None,  # bypass 100-tick guard in stop-world
+                )
+                fallback_fn = get_fallback(agent.persona)
+                fb_skill = fallback_fn(ctx)
+        except Exception as e:
+            logger.warning(
+                "agent[pid=%d] stop-world fallback raised: %s; using HoldPosition",
+                agent.player_id, e,
+            )
+            fb_skill = HoldPosition()
         agent.install_skill(
             fb_skill,
             tick=self.env.tick,
@@ -403,6 +442,8 @@ class MultiAgentRunner:
 
     def run(self) -> dict:
         """Run the simulation until env.done / max_decisions / max_wall_seconds."""
+        if self.stop_world_mode:
+            return self._run_stop_world()
 
         # 1. Initial fallback controllers so every agent has SOMETHING running
         #    from tick 0 (else step_motor returns IDLE which is fine but
@@ -584,6 +625,187 @@ class MultiAgentRunner:
                         # the configured fps); resync to now so we don't
                         # build unbounded debt.
                         last_tick_wall = now
+        finally:
+            self._stop_flag.set()
+            for a in self.agents:
+                a.stop(timeout=0.5)
+
+        return {
+            "wall_seconds": time.monotonic() - wall_start,
+            "env_ticks": self.env.tick,
+            "decisions_total": self._decisions_completed,
+            "n_agents": len(self.agents),
+            "cumulative_reward": self.env.cumulative_reward,
+            "log": self._decision_log,
+        }
+
+    # ---- stop-world mode ------------------------------------------------
+
+    def _run_stop_world(self) -> dict:
+        """Stop-the-world mode: discrete decide → execute K-tick cycles.
+
+        Each cycle:
+          1. Push obs to ALL agents simultaneously (30ms stagger per agent
+             to avoid rate-limit burst — blocker #2 fix).
+          2. Wait up to stop_world_timeout seconds for ALL to return decisions.
+             Timeout agents get a fallback (with recent_llm_intent=None —
+             blocker #1 fix) rather than blocking the whole match.
+          3. Execute obs_refresh_every_ticks env ticks with those decisions.
+
+        The env.tick counter does NOT advance during phase 1-2, so agents
+        reason on a stable world snapshot — no more "I decided to pass but
+        the ball moved 10m while I was thinking".
+        """
+        # ---- Initial setup (mirrors the async run() preamble) ----
+        for a in self.agents:
+            self._arm_fallback_for(a)
+
+        for i, a in enumerate(self.agents):
+            obs = a.perceive(self.env.raw_obs_for_slot(a.slot), self.env.tick)
+            a.push_observation(obs)
+            a.start()
+            if i < len(self.agents) - 1:
+                time.sleep(0.05)
+
+        self._wait_for_kickoff()
+
+        wall_start = time.monotonic()
+        last_tick_wall = time.monotonic()
+
+        try:
+            while True:
+                # ---- Termination ----
+                if self.env.done:
+                    break
+                if self._stop_flag.is_set():
+                    break
+                if self._decisions_completed >= self.max_decisions_total:
+                    break
+                if time.monotonic() - wall_start >= self.max_wall_seconds:
+                    break
+
+                # ---- Phase 1: Push obs to ALL agents (staggered for rate limit) ----
+                for i, a in enumerate(self.agents):
+                    raw = self.env.raw_obs_for_slot(a.slot)
+                    obs = a.perceive(raw, self.env.tick)
+                    a.push_observation(obs)
+                    if i < len(self.agents) - 1:
+                        time.sleep(0.03)  # 30ms → ~3 req/s burst not 10 simultaneous
+
+                # ---- Phase 2: Wait for ALL decisions (or per-agent timeout) ----
+                decided: set[int] = set()
+                deadline = time.monotonic() + self._stop_world_timeout
+
+                while len(decided) < len(self.agents):
+                    if self._stop_flag.is_set() or time.monotonic() > deadline:
+                        break
+                    for a in self.agents:
+                        if a.slot in decided:
+                            continue
+                        item = a.try_pop_skill()
+                        if item is None:
+                            continue
+                        skill, llm_dt, obs_tick = item
+                        a.install_skill(
+                            skill,
+                            tick=self.env.tick,
+                            raw_obs=self.env.raw_obs_for_slot(a.slot),
+                            from_llm=True,
+                        )
+                        self._decisions_completed += 1
+                        log_entry = {
+                            "decision": self._decisions_completed,
+                            "player_id": a.player_id,
+                            "slot": a.slot,
+                            "env_tick": self.env.tick,
+                            "obs_tick": obs_tick,
+                            "lag_ticks": 0,  # env didn't advance during freeze
+                            "llm_seconds": llm_dt,
+                            "skill": skill,
+                        }
+                        self._decision_log.append(log_entry)
+                        if self._on_decision_cb is not None:
+                            try:
+                                self._on_decision_cb(log_entry)
+                            except Exception as e:
+                                logger.warning("on_decision callback raised: %s", e)
+                        decided.add(a.slot)
+                    if len(decided) < len(self.agents):
+                        time.sleep(0.02)
+
+                # Fallback for timed-out agents (blocker #1 fix: recent_llm_intent=None)
+                for a in self.agents:
+                    if a.slot not in decided:
+                        logger.warning(
+                            "stop-world: agent[pid=%d] timed out (%.1fs), arming fallback",
+                            a.player_id, self._stop_world_timeout,
+                        )
+                        self._arm_fallback_for_stop_world(a)
+
+                # ---- Phase 3: Execute K env ticks with current decisions ----
+                last_tick_wall = time.monotonic()
+                for _ in range(self.obs_refresh_every_ticks):
+                    if self.env.done or self._stop_flag.is_set():
+                        break
+                    if (self._decisions_completed >= self.max_decisions_total
+                            or time.monotonic() - wall_start >= self.max_wall_seconds):
+                        break
+
+                    actions: list[int] = [self._IDLE_ACTION] * self.n_slots
+                    for a in self.agents:
+                        raw = self.env.raw_obs_for_slot(a.slot)
+                        action, status = a.step_motor(raw)
+                        actions[a.slot] = action
+                        if status != "in_progress":
+                            self._arm_fallback_for_stop_world(a)
+
+                    self.env.step_actions(actions)
+
+                    # 3D frame stream
+                    if (self._on_frame_cb is not None
+                            and self.env.tick - self._last_frame_stream >= self._frame_stream_every):
+                        frame = self.env.latest_frame
+                        if frame is not None:
+                            self._last_frame_stream = self.env.tick
+                            try:
+                                self._on_frame_cb(frame)
+                            except Exception as e:
+                                logger.warning("on_frame callback raised: %s", e)
+
+                    # Position snapshot for live pitch view
+                    if (self._on_tick_cb is not None
+                            and self.env.tick - self._last_tick_stream >= self._tick_stream_every):
+                        self._last_tick_stream = self.env.tick
+                        try:
+                            raw = self.env.raw_obs
+                            snap = {
+                                "env_tick": self.env.tick,
+                                "left_team": [[float(p[0]), float(p[1])] for p in raw["left_team"]],
+                                "right_team": [[float(p[0]), float(p[1])] for p in raw["right_team"]],
+                                "ball": [float(raw["ball"][0]), float(raw["ball"][1])],
+                                "ball_owned_team": int(raw.get("ball_owned_team", -1)),
+                                "ball_owned_player": int(raw.get("ball_owned_player", -1)),
+                                "score_left": int(raw.get("score", [0, 0])[0]),
+                                "score_right": int(raw.get("score", [0, 0])[1]),
+                                "game_mode": int(raw.get("game_mode", 0)),
+                            }
+                            self._on_tick_cb(snap)
+                        except Exception as e:
+                            logger.warning("on_tick callback raised: %s", e)
+
+                    # Rate cap (deadline-carry pacing)
+                    if self._target_tick_dt > 0:
+                        next_deadline = last_tick_wall + self._target_tick_dt
+                        now = time.monotonic()
+                        sleep_for = next_deadline - now
+                        if sleep_for > 0:
+                            time.sleep(sleep_for)
+                            last_tick_wall = next_deadline
+                        elif sleep_for > -3.0 * self._target_tick_dt:
+                            last_tick_wall = next_deadline
+                        else:
+                            last_tick_wall = now
+
         finally:
             self._stop_flag.set()
             for a in self.agents:

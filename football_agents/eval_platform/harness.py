@@ -49,6 +49,11 @@ class EpisodeConfig:
     # 3 ticks @ 50fps cap = ~17 fps video — smooth enough, ~25 KB/frame JPEG = ~400 KB/s.
     frame_stream_every_ticks: int = 3
     render: bool = False
+    # Stop-world mode: pause env while all agents decide, then execute K ticks.
+    # Default False = original async mode (field keeps moving during LLM think).
+    stop_world_mode: bool = False
+    # Per-agent timeout (seconds) before arming fallback and unblocking.
+    stop_world_timeout: float = 8.0
 
     def __post_init__(self) -> None:
         # When render=True, the heavier env.step (~19ms) blows the 20ms tick
@@ -175,9 +180,9 @@ def run_episode(
         tick_stream_every_ticks=config.tick_stream_every_ticks,
         on_frame=on_frame,
         frame_stream_every_ticks=config.frame_stream_every_ticks,
-        # Bubble runner-emitted phase events ("waiting_for_kickoff", "kickoff",
-        # ...) up the same on_status pipe the harness already publishes through.
         on_status=on_status,
+        stop_world_mode=config.stop_world_mode,
+        stop_world_timeout=config.stop_world_timeout,
     )
     # Expose the runner so the server can call request_stop() on user click.
     if register_runner is not None:

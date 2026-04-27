@@ -520,6 +520,12 @@
                    class="w-4 h-4 rounded bg-zinc-900 border-zinc-700 text-indigo-500 focus:ring-indigo-500" />
             Render gfootball 3D 窗口
           </label>
+          <label class="flex items-center gap-2 text-sm text-zinc-300 cursor-pointer" title="暂停球场等所有 Agent 决策完再继续，彻底消除 fallback 乱跑">
+            <input type="checkbox" x-model="newRun.stop_world_mode"
+                   class="w-4 h-4 rounded bg-zinc-900 border-zinc-700 text-amber-400 focus:ring-amber-400" />
+            <span>Stop-World 模式</span>
+            <span class="text-zinc-500 text-[11px]">（决策期间暂停球场）</span>
+          </label>
           <label class="flex items-center gap-2 text-sm text-zinc-400">
             <span class="text-xs uppercase tracking-wider">N episodes</span>
             <input type="number" min="1" max="50" x-model.number="newRun.n_episodes"
@@ -566,6 +572,8 @@
           tick_stream_every_ticks: 5,
           frame_stream_every_ticks: 3,
           render: true,
+          stop_world_mode: false,
+          stop_world_timeout: 8.0,
         },
         lastTick: null,
         stopping: false,
