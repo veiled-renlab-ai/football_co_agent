@@ -358,7 +358,27 @@ def render_observation(obs: Observation, persona: PlayerPersona) -> str:
     # Ball state — EXPLICIT possession line
     ball = obs.ball()
     if s.has_ball:
+        import math as _math
+        # 对方球门:x=+1.00, y∈[-0.044, +0.044]。距离 = 球员到球门中心的欧氏距离。
+        # 因为 gfootball 已经做了左右队镜像,所有球员的 +x 都指向"对方球门"。
+        dx_to_goal = 1.0 - float(s.position.x)
+        dist_to_goal = _math.hypot(dx_to_goal, float(s.position.y))
+        if dist_to_goal < 0.25:
+            zone_hint = "近距离射门区"
+        elif dist_to_goal < 0.35:
+            zone_hint = "禁区内"
+        elif dist_to_goal < 0.55:
+            zone_hint = "禁区外、射门远"
+        else:
+            zone_hint = "中场以远，离球门很远"
         lines.append("✅ **球在你脚下，由你控制**。你可以射门、传球、带球突破。")
+        lines.append(
+            f"  · **对方球门**:x=+1.00, y∈[-0.044, +0.044]"
+            f"(球门中心 (1.00, 0.00),向 +x 还有 {dx_to_goal:+.2f},向 +y 还有 {-float(s.position.y):+.2f})。"
+        )
+        lines.append(
+            f"  · **你距对方球门** {dist_to_goal:.2f} 单位 —— {zone_hint}。"
+        )
     elif ball is not None:
         carrier_line = None
         for e in obs.perceived_entities:
@@ -463,6 +483,10 @@ def render_observation(obs: Observation, persona: PlayerPersona) -> str:
     lines.append(
         f"• 球场范围：x ∈ [-1.00, +1.00]（你方球门 x=-1，**对方球门 x=+1**），"
         f"y ∈ [-0.42, +0.42]（左边线 y=-0.42，右边线 y=+0.42）"
+    )
+    lines.append(
+        f"• 球门尺寸：两边球门都是 y∈[-0.044, +0.044]（即球门宽度约 0.088 单位）。"
+        f"对方球门线在 x=+1.00,自家球门线在 x=-1.00。"
     )
     lines.append(
         f"• 你的精确坐标：({s.position.x:+.2f}, {s.position.y:+.2f})"

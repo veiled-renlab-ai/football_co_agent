@@ -109,7 +109,8 @@ class PassTo(Skill):
     """Pass the ball to a specific teammate. Requires possession."""
     tool_name: ClassVar[str] = "pass_to"
     description: ClassVar[str] = (
-        "把球传给指定球衣号码的队友。"
+        "把球传给指定队友。target_player_id 就是观察里看到的队友编号 (0-4)，"
+        "和 '你视野里的队友' 列表里的编号完全一致。"
         "pass_type='short' 地面短传 / 'long' 高吊长传 / 'through' 直塞防线身后。"
     )
     target_player_id: int
@@ -153,6 +154,7 @@ class Mark(Skill):
     tool_name: ClassVar[str] = "mark"
     description: ClassVar[str] = (
         "盯防指定对手 —— 站位在他和己方球门之间，跟随其移动，断他的接球路线。"
+        "opponent_id 就是 '你视野里的对手' 列表里看到的对手编号 (0-4)。"
     )
     opponent_id: int
 
@@ -163,6 +165,7 @@ class Press(Skill):
     tool_name: ClassVar[str] = "press"
     description: ClassVar[str] = (
         "上抢指定对手 —— 全速冲过去逼抢，压缩他处理球的空间，迫使失误。"
+        "opponent_id 就是 '你视野里的对手' 列表里看到的对手编号 (0-4)。"
     )
     opponent_id: int
 
@@ -197,6 +200,7 @@ class Track(Skill):
     tool_name: ClassVar[str] = "track"
     description: ClassVar[str] = (
         "锁定视觉注意力到某个特定球员或球；即使他不是最近的实体，也始终保留在你的视野里。"
+        "entity_id 就是 '你视野里的队友/对手' 列表里看到的编号 (0-4)。"
     )
     entity_id: int
 

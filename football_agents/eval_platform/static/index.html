@@ -1,0 +1,792 @@
+<!doctype html>
+<html lang="zh-CN" class="dark">
+<head>
+  <meta charset="utf-8" />
+  <title>Academy · 5v5 Eval</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.13.5/dist/cdn.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg-0: #09090b;
+      --bg-1: #18181b;
+      --bg-2: #27272a;
+      --border: #3f3f46;
+      --text-0: #fafafa;
+      --text-1: #a1a1aa;
+      --text-2: #71717a;
+      --accent: #818cf8;
+      --accent-strong: #6366f1;
+      --blue: #60a5fa;
+      --red: #f87171;
+      --green: #4ade80;
+      --yellow: #facc15;
+    }
+    html, body { background: var(--bg-0); color: var(--text-0); font-family: 'Inter', system-ui, sans-serif; }
+    .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+    .card { background: var(--bg-1); border: 1px solid var(--border); border-radius: 12px; }
+    .card-hover:hover { background: var(--bg-2); }
+    .pill { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: 600; letter-spacing: 0.02em; }
+    .pill-running { background: rgba(99, 102, 241, 0.18); color: #c7d2fe; }
+    .pill-completed { background: rgba(74, 222, 128, 0.16); color: #86efac; }
+    .pill-failed { background: rgba(248, 113, 113, 0.16); color: #fca5a5; }
+    .pill-queued { background: rgba(161, 161, 170, 0.16); color: #d4d4d8; }
+    .gradient-text { background: linear-gradient(135deg, #818cf8 0%, #c084fc 50%, #f472b6 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+    .scrollbar::-webkit-scrollbar { width: 8px; height: 8px; }
+    .scrollbar::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 4px; }
+    .scrollbar::-webkit-scrollbar-thumb:hover { background: #52525b; }
+    .scrollbar::-webkit-scrollbar-track { background: transparent; }
+    .glow { box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.4), 0 0 30px rgba(99, 102, 241, 0.15); }
+    .pulse-dot { animation: pulse-dot 1.4s ease-in-out infinite; }
+    @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+    .feed-row { animation: slide-in 0.25s ease-out; }
+    @keyframes slide-in { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: translateX(0); } }
+  </style>
+</head>
+<body class="min-h-screen" x-data="academyApp()" x-init="boot()">
+
+  <!-- Top bar -->
+  <header class="border-b border-zinc-800 bg-zinc-950/80 backdrop-blur sticky top-0 z-40">
+    <div class="px-6 py-3 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-fuchsia-500 flex items-center justify-center font-bold text-sm">A</div>
+        <div>
+          <div class="text-lg font-semibold tracking-tight gradient-text">ACADEMY</div>
+          <div class="text-xs text-zinc-500 -mt-0.5">5v5 LLM agent eval</div>
+        </div>
+      </div>
+      <div class="flex items-center gap-3">
+        <div class="text-xs text-zinc-500 mono" x-text="`${runs.length} runs`"></div>
+        <button @click="newRunModalOpen = true"
+                class="px-3.5 py-1.5 text-sm font-medium bg-indigo-600 hover:bg-indigo-500 transition-colors rounded-lg flex items-center gap-1.5">
+          <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14" stroke-linecap="round"/></svg>
+          New Run
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="flex" style="height: calc(100vh - 57px);">
+
+    <!-- Left sidebar: run list -->
+    <aside class="w-72 border-r border-zinc-800 overflow-y-auto scrollbar bg-zinc-950">
+      <div class="p-3 sticky top-0 bg-zinc-950 border-b border-zinc-800">
+        <div class="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider px-1">Runs</div>
+      </div>
+      <template x-if="runs.length === 0">
+        <div class="px-4 py-12 text-center text-sm text-zinc-600">
+          <div class="text-3xl mb-2 opacity-40">∅</div>
+          No runs yet — kick one off.
+        </div>
+      </template>
+      <ul class="px-2 py-2 space-y-1">
+        <template x-for="r in runs" :key="r.run_id">
+          <li>
+            <button @click="selectRun(r.run_id)"
+                    class="w-full text-left px-3 py-2.5 rounded-lg card-hover transition"
+                    :class="selectedRunId === r.run_id ? 'bg-zinc-800 ring-1 ring-indigo-500/50' : 'bg-transparent'">
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-xs font-medium text-zinc-300 mono" x-text="r.run_id.split('-').slice(0, 2).join('-')"></span>
+                <span class="pill" :class="`pill-${r.status}`">
+                  <span x-show="r.status === 'running'" class="w-1.5 h-1.5 rounded-full bg-indigo-400 pulse-dot"></span>
+                  <span x-text="r.status"></span>
+                </span>
+              </div>
+              <div class="text-[11px] text-zinc-500 flex items-center justify-between">
+                <span x-text="`${r.completed_episodes}/${r.n_episodes} ep · ${r.scenario}`"></span>
+                <span class="mono"
+                      x-show="r.aggregate && (r.aggregate.blue_wins !== undefined)"
+                      x-text="`${r.aggregate.blue_wins}-${r.aggregate.draws}-${r.aggregate.red_wins}`"></span>
+              </div>
+            </button>
+          </li>
+        </template>
+      </ul>
+    </aside>
+
+    <!-- Main content -->
+    <section class="flex-1 overflow-y-auto scrollbar">
+
+      <!-- Empty state -->
+      <template x-if="!selectedRunId">
+        <div class="h-full flex items-center justify-center">
+          <div class="text-center max-w-md px-6">
+            <div class="text-6xl mb-4 opacity-30">⚽</div>
+            <h2 class="text-2xl font-bold mb-2 gradient-text">Welcome to Academy</h2>
+            <p class="text-zinc-400 text-sm mb-6">无头模式跑 5v5 评测,实时看每个 agent 的决策、延迟、技能分布。点 <span class="text-indigo-400 font-medium">New Run</span> 启动一局。</p>
+            <div class="grid grid-cols-3 gap-3 text-xs">
+              <div class="card p-3"><div class="text-2xl mb-1 opacity-50">⚡</div><div class="text-zinc-300 font-medium">实时</div><div class="text-zinc-500 mt-1">WebSocket 推送决策</div></div>
+              <div class="card p-3"><div class="text-2xl mb-1 opacity-50">📊</div><div class="text-zinc-300 font-medium">指标</div><div class="text-zinc-500 mt-1">延迟/技能/fallback</div></div>
+              <div class="card p-3"><div class="text-2xl mb-1 opacity-50">💾</div><div class="text-zinc-300 font-medium">持久化</div><div class="text-zinc-500 mt-1">eval_runs/ JSON</div></div>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- Run detail -->
+      <template x-if="selectedRunId && runDetail">
+        <div class="px-6 py-6">
+
+          <!-- Header card -->
+          <div class="card glow p-5 mb-5">
+            <div class="flex items-start justify-between mb-4">
+              <div>
+                <div class="flex items-center gap-2 mb-1">
+                  <span class="text-xs text-zinc-500 mono" x-text="runDetail.run_id"></span>
+                  <span class="pill" :class="`pill-${runDetail.status}`">
+                    <span x-show="runDetail.status === 'running'" class="w-1.5 h-1.5 rounded-full bg-indigo-400 pulse-dot"></span>
+                    <span x-text="runDetail.status"></span>
+                  </span>
+                </div>
+                <h2 class="text-xl font-semibold" x-text="runDetail.config.scenario"></h2>
+                <div class="text-xs text-zinc-500 mt-1">
+                  <span x-text="`${runDetail.completed_episodes}/${runDetail.n_episodes} episodes`"></span>
+                  <span class="mx-2">·</span>
+                  <span x-text="`${runDetail.config.max_decisions_total} max decisions`"></span>
+                  <span class="mx-2">·</span>
+                  <span x-text="`${runDetail.config.max_wall_seconds}s wall cap`"></span>
+                </div>
+              </div>
+              <!-- Score + stop -->
+              <div class="text-right flex items-start gap-3">
+                <div>
+                  <div class="text-[10px] uppercase tracking-wider text-zinc-500">Aggregate</div>
+                  <div class="mono text-2xl font-bold mt-1">
+                    <span class="text-blue-400" x-text="runDetail.aggregate.blue_wins ?? 0"></span>
+                    <span class="text-zinc-600 mx-1">·</span>
+                    <span class="text-zinc-400" x-text="runDetail.aggregate.draws ?? 0"></span>
+                    <span class="text-zinc-600 mx-1">·</span>
+                    <span class="text-red-400" x-text="runDetail.aggregate.red_wins ?? 0"></span>
+                  </div>
+                  <div class="text-[10px] text-zinc-500 mt-0.5">蓝 · 平 · 红</div>
+                </div>
+                <button x-show="runDetail.status === 'running'"
+                        @click="stopRun()" :disabled="stopping"
+                        class="self-center px-3 py-1.5 text-xs font-medium bg-red-600 hover:bg-red-500 disabled:opacity-50 transition rounded-lg flex items-center gap-1.5">
+                  <svg class="w-3 h-3" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
+                  <span x-text="stopping ? '正在停止...' : '停止'"></span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Stat tiles -->
+            <div class="grid grid-cols-4 gap-3 mt-4">
+              <div class="card bg-zinc-900 p-3">
+                <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-1">Avg score</div>
+                <div class="mono text-lg font-semibold">
+                  <span class="text-blue-400" x-text="(runDetail.aggregate.avg_blue_score ?? 0).toFixed(2)"></span>
+                  <span class="text-zinc-600 mx-1">:</span>
+                  <span class="text-red-400" x-text="(runDetail.aggregate.avg_red_score ?? 0).toFixed(2)"></span>
+                </div>
+              </div>
+              <div class="card bg-zinc-900 p-3">
+                <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-1">Avg decisions</div>
+                <div class="mono text-lg font-semibold text-zinc-100" x-text="(runDetail.aggregate.avg_decisions ?? 0).toFixed(0)"></div>
+              </div>
+              <div class="card bg-zinc-900 p-3">
+                <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-1">LLM p50 / p95</div>
+                <div class="mono text-lg font-semibold text-zinc-100">
+                  <span x-text="(runDetail.aggregate.llm_latency_p50 ?? 0).toFixed(2)"></span>s
+                  <span class="text-zinc-600 mx-0.5">/</span>
+                  <span x-text="(runDetail.aggregate.llm_latency_p95 ?? 0).toFixed(2)"></span>s
+                </div>
+              </div>
+              <div class="card bg-zinc-900 p-3">
+                <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-1">Avg wall / ep</div>
+                <div class="mono text-lg font-semibold text-zinc-100" x-text="`${(runDetail.aggregate.avg_wall_seconds ?? 0).toFixed(1)}s`"></div>
+              </div>
+            </div>
+
+            <!-- Live decisions ticker -->
+            <div x-show="runDetail.status === 'running'" class="mt-4 flex items-center gap-2 text-xs text-indigo-300">
+              <span class="w-1.5 h-1.5 rounded-full bg-indigo-400 pulse-dot"></span>
+              Live · <span class="mono" x-text="`${liveCount} decisions streamed`"></span>
+            </div>
+            <div x-show="runDetail.error" class="mt-3 px-3 py-2 rounded-lg bg-red-950/40 border border-red-900/50 text-sm text-red-300">
+              <div class="font-semibold mb-0.5">Error</div>
+              <div class="mono text-xs" x-text="runDetail.error"></div>
+            </div>
+          </div>
+
+          <!-- Kickoff-wait banner — visible only while runner is collecting first LLM decisions -->
+          <div x-show="kickoffWait" x-transition.opacity
+               class="card glow p-4 mb-5 border-indigo-500/40">
+            <div class="flex items-center gap-3">
+              <span class="w-2.5 h-2.5 rounded-full bg-indigo-400 pulse-dot shrink-0"></span>
+              <div class="flex-1">
+                <div class="text-sm font-semibold text-zinc-100">
+                  等待 <span class="mono" x-text="kickoffWait?.total ?? 0"></span> 个 LLM 准备开球…
+                  <span class="mono text-indigo-300 ml-1"
+                        x-text="`(${kickoffWait?.ready ?? 0}/${kickoffWait?.total ?? 0} ready)`"></span>
+                </div>
+                <div class="text-[11px] text-zinc-500 mt-0.5">
+                  env tick = 0,游戏未开始;最长等待
+                  <span class="mono" x-text="(kickoffWait?.timeout_seconds ?? 8).toFixed(1)"></span> 秒,
+                  超时后未响应的 agent 由 fallback 接管。
+                </div>
+              </div>
+              <!-- Progress bar -->
+              <div class="w-32 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                <div class="h-full bg-gradient-to-r from-indigo-500 to-fuchsia-500 transition-all"
+                     :style="`width: ${kickoffWait?.total ? Math.round(100 * (kickoffWait.ready / kickoffWait.total)) : 0}%`"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Live pitch view (top-down 2D) + optional 3D video stream -->
+          <div class="card p-4 mb-5">
+            <div class="flex items-center justify-between mb-3">
+              <div class="flex items-center gap-2">
+                <h3 class="text-sm font-semibold text-zinc-200">球场实况</h3>
+                <span x-show="lastTick" class="pill pill-running">
+                  <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 pulse-dot"></span>
+                  Live
+                </span>
+                <!-- View toggle: 3D video vs 2D SVG -->
+                <div class="flex bg-zinc-900 rounded-md p-0.5 ml-2 text-[11px]"
+                     x-show="runDetail.config?.render">
+                  <button @click="viewMode='3d'"
+                          :class="viewMode==='3d' ? 'bg-indigo-600 text-white' : 'text-zinc-400'"
+                          class="px-2 py-0.5 rounded transition">3D 视频</button>
+                  <button @click="viewMode='2d'"
+                          :class="viewMode==='2d' ? 'bg-indigo-600 text-white' : 'text-zinc-400'"
+                          class="px-2 py-0.5 rounded transition">2D 俯视</button>
+                </div>
+              </div>
+              <div class="text-xs text-zinc-400 mono" x-show="lastTick">
+                <span class="text-zinc-500">tick</span>
+                <span x-text="lastTick?.env_tick ?? 0"></span>
+                <span class="text-zinc-600 mx-1">·</span>
+                <span class="text-zinc-300" x-text="formatGameClock(lastTick?.env_tick ?? 0)"></span>
+                <span class="text-zinc-500"> / 90:00</span>
+                <span class="text-zinc-600 mx-1">·</span>
+                <span class="text-blue-400" x-text="lastTick?.score_left ?? 0"></span>:<span class="text-red-400" x-text="lastTick?.score_right ?? 0"></span>
+              </div>
+            </div>
+            <!-- 3D video stream (gfootball EGL render → MJPEG) -->
+            <div x-show="runDetail.config?.render && viewMode==='3d'"
+                 class="bg-black rounded-lg overflow-hidden">
+              <img :src="videoStreamUrl"
+                   :key="videoStreamUrl"
+                   class="w-full block"
+                   style="aspect-ratio: 16/9; object-fit: contain; background: #000;"
+                   alt="gfootball live"
+                   @error="videoError=true; viewMode='2d'"/>
+              <div x-show="runDetail.status !== 'running'"
+                   class="text-xs text-zinc-500 text-center py-2">
+                比赛已结束 —— 视频流停止。切到 2D 看最终位置。
+              </div>
+            </div>
+            <!-- 2D top-down SVG -->
+            <div x-show="!runDetail.config?.render || viewMode==='2d'"
+                 class="bg-emerald-950/60 rounded-lg p-1">
+              <svg viewBox="-110 -52 220 104" xmlns="http://www.w3.org/2000/svg" class="w-full block" style="aspect-ratio: 220/104;" preserveAspectRatio="xMidYMid meet">
+                <!-- pitch boundary -->
+                <rect x="-100" y="-42" width="200" height="84" fill="#14532d" stroke="#86efac" stroke-width="0.4"/>
+                <!-- halfway line + center circle + spot -->
+                <line x1="0" y1="-42" x2="0" y2="42" stroke="#86efac" stroke-width="0.3"/>
+                <circle cx="0" cy="0" r="9.15" fill="none" stroke="#86efac" stroke-width="0.3"/>
+                <circle cx="0" cy="0" r="0.4" fill="#86efac"/>
+                <!-- penalty boxes (approx, scaled gfootball coords) -->
+                <rect x="83" y="-19.7" width="17" height="39.4" fill="none" stroke="#86efac" stroke-width="0.25"/>
+                <rect x="-100" y="-19.7" width="17" height="39.4" fill="none" stroke="#86efac" stroke-width="0.25"/>
+                <!-- goal areas (smaller) -->
+                <rect x="93.5" y="-9.16" width="6.5" height="18.32" fill="none" stroke="#86efac" stroke-width="0.25"/>
+                <rect x="-100" y="-9.16" width="6.5" height="18.32" fill="none" stroke="#86efac" stroke-width="0.25"/>
+                <!-- goals (the actual posts y∈[-0.044, +0.044] = ±4.4 in our scale) -->
+                <rect x="100" y="-4.4" width="2" height="8.8" fill="#fde68a" stroke="#92400e" stroke-width="0.2"/>
+                <rect x="-102" y="-4.4" width="2" height="8.8" fill="#fde68a" stroke="#92400e" stroke-width="0.2"/>
+
+                <!-- left team (蓝, 5 players: GK, RM, CF, LB, CB → indices 0-4) -->
+                <template x-for="(p, i) in (lastTick?.left_team ?? [])" :key="`L${i}`">
+                  <g>
+                    <circle :cx="p[0]*100" :cy="p[1]*100"
+                            :r="(lastTick?.ball_owned_team === 0 && lastTick?.ball_owned_player === i) ? 3.0 : 2.4"
+                            fill="#3b82f6"
+                            :stroke="(lastTick?.ball_owned_team === 0 && lastTick?.ball_owned_player === i) ? '#fde68a' : '#1e3a8a'"
+                            :stroke-width="(lastTick?.ball_owned_team === 0 && lastTick?.ball_owned_player === i) ? 0.7 : 0.4"/>
+                    <text :x="p[0]*100" :y="p[1]*100 + 1.0" text-anchor="middle"
+                          font-size="2.8" fill="white" font-weight="700"
+                          font-family="JetBrains Mono, ui-monospace" x-text="i"></text>
+                  </g>
+                </template>
+                <!-- right team (红) -->
+                <template x-for="(p, i) in (lastTick?.right_team ?? [])" :key="`R${i}`">
+                  <g>
+                    <circle :cx="p[0]*100" :cy="p[1]*100"
+                            :r="(lastTick?.ball_owned_team === 1 && lastTick?.ball_owned_player === i) ? 3.0 : 2.4"
+                            fill="#ef4444"
+                            :stroke="(lastTick?.ball_owned_team === 1 && lastTick?.ball_owned_player === i) ? '#fde68a' : '#7f1d1d'"
+                            :stroke-width="(lastTick?.ball_owned_team === 1 && lastTick?.ball_owned_player === i) ? 0.7 : 0.4"/>
+                    <text :x="p[0]*100" :y="p[1]*100 + 1.0" text-anchor="middle"
+                          font-size="2.8" fill="white" font-weight="700"
+                          font-family="JetBrains Mono, ui-monospace" x-text="i"></text>
+                  </g>
+                </template>
+                <!-- ball -->
+                <circle x-show="lastTick"
+                        :cx="(lastTick?.ball?.[0] ?? 0)*100"
+                        :cy="(lastTick?.ball?.[1] ?? 0)*100"
+                        r="1.4" fill="#fef3c7" stroke="#78350f" stroke-width="0.3"/>
+              </svg>
+            </div>
+            <div class="mt-2 flex items-center gap-4 text-[11px] text-zinc-500">
+              <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-blue-500"></span>蓝队 (左向右进攻)</span>
+              <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-red-500"></span>红队 (右向左进攻)</span>
+              <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-amber-100"></span>球</span>
+              <span class="ml-auto mono text-zinc-600" x-show="lastTick">
+                ball <span x-text="`(${(lastTick?.ball?.[0] ?? 0).toFixed(2)}, ${(lastTick?.ball?.[1] ?? 0).toFixed(2)})`"></span>
+              </span>
+              <span x-show="!lastTick" class="text-zinc-600 italic">等待第一帧...</span>
+            </div>
+          </div>
+
+          <!-- Episode list -->
+          <div class="card p-5 mb-5">
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="text-sm font-semibold text-zinc-200">Episodes</h3>
+              <span class="text-xs text-zinc-500 mono" x-text="`${runDetail.episodes?.length ?? 0} done`"></span>
+            </div>
+            <div class="overflow-x-auto scrollbar">
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="text-[10px] uppercase tracking-wider text-zinc-500 border-b border-zinc-800">
+                    <th class="text-left font-medium py-2 pr-3">#</th>
+                    <th class="text-left font-medium py-2 pr-3">Score</th>
+                    <th class="text-left font-medium py-2 pr-3">Outcome</th>
+                    <th class="text-right font-medium py-2 pr-3">Decisions</th>
+                    <th class="text-right font-medium py-2 pr-3">Ticks</th>
+                    <th class="text-right font-medium py-2 pr-3">Wall</th>
+                    <th class="text-right font-medium py-2 pr-3">LLM p50</th>
+                    <th class="text-right font-medium py-2 pr-3">Fallback/dec</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="ep in (runDetail.episodes ?? [])" :key="ep.ep_index">
+                    <tr class="border-b border-zinc-900 hover:bg-zinc-900/60 transition">
+                      <td class="py-2 pr-3 mono text-zinc-400" x-text="`#${ep.ep_index}`"></td>
+                      <td class="py-2 pr-3 mono">
+                        <span class="text-blue-400" x-text="ep.summary.score_blue"></span>
+                        <span class="text-zinc-600 mx-0.5">:</span>
+                        <span class="text-red-400" x-text="ep.summary.score_red"></span>
+                      </td>
+                      <td class="py-2 pr-3">
+                        <span class="pill"
+                              :class="ep.summary.outcome === 'blue_win' ? 'pill-running' : ep.summary.outcome === 'red_win' ? 'pill-failed' : 'pill-queued'"
+                              x-text="ep.summary.outcome"></span>
+                      </td>
+                      <td class="py-2 pr-3 mono text-right text-zinc-300" x-text="ep.summary.decisions_total"></td>
+                      <td class="py-2 pr-3 mono text-right text-zinc-400" x-text="ep.summary.env_ticks"></td>
+                      <td class="py-2 pr-3 mono text-right text-zinc-400" x-text="`${ep.summary.wall_seconds}s`"></td>
+                      <td class="py-2 pr-3 mono text-right text-zinc-300" x-text="`${ep.summary.llm_latency.p50.toFixed(2)}s`"></td>
+                      <td class="py-2 pr-3 mono text-right text-zinc-400" x-text="ep.summary.fallback_per_decision.toFixed(2)"></td>
+                      <td class="py-2 text-right">
+                        <button @click="loadEpisode(ep.ep_index)"
+                                class="text-xs text-indigo-400 hover:text-indigo-300 transition">详情 →</button>
+                      </td>
+                    </tr>
+                  </template>
+                  <template x-if="!runDetail.episodes || runDetail.episodes.length === 0">
+                    <tr><td colspan="9" class="text-center text-sm text-zinc-500 py-8">还没有 episode 完成</td></tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Two-column: skill chart + per-agent + live feed -->
+          <div class="grid grid-cols-3 gap-5 mb-5">
+            <div class="card p-5 col-span-2">
+              <h3 class="text-sm font-semibold text-zinc-200 mb-3">Skill distribution
+                <span class="text-zinc-500 font-normal ml-1" x-text="selectedEpisodeIdx ? `· episode #${selectedEpisodeIdx}` : '· latest episode'"></span>
+              </h3>
+              <div class="h-72">
+                <canvas id="skillChart"></canvas>
+              </div>
+            </div>
+            <div class="card p-5">
+              <h3 class="text-sm font-semibold text-zinc-200 mb-3">Live decisions</h3>
+              <div class="overflow-y-auto scrollbar h-72 space-y-1 pr-1" id="liveFeed">
+                <template x-for="(d, i) in liveFeed.slice(-50).reverse()" :key="`${d.episode}-${d.decision}-${i}`">
+                  <div class="feed-row flex items-start gap-2 px-2 py-1.5 rounded text-xs bg-zinc-900/50 hover:bg-zinc-900">
+                    <span class="mono text-zinc-600 shrink-0 w-12" x-text="`t${d.env_tick}`"></span>
+                    <span class="shrink-0" :class="(d.label || '').startsWith('蓝') ? 'text-blue-400' : 'text-red-400'" x-text="(d.label || '').slice(0, 8)"></span>
+                    <span class="text-zinc-300 mono" x-text="renderSkill(d.skill)"></span>
+                    <span class="ml-auto text-zinc-600 mono shrink-0" x-text="`${d.llm_seconds}s`"></span>
+                  </div>
+                </template>
+                <template x-if="liveFeed.length === 0">
+                  <div class="text-zinc-600 text-xs text-center py-12">等待决策...</div>
+                </template>
+              </div>
+            </div>
+          </div>
+
+          <!-- Per-agent breakdown -->
+          <div class="card p-5" x-show="perAgentRows.length > 0">
+            <h3 class="text-sm font-semibold text-zinc-200 mb-3">Per-agent breakdown
+              <span class="text-zinc-500 font-normal ml-1" x-text="selectedEpisodeIdx ? `· episode #${selectedEpisodeIdx}` : '· latest episode'"></span>
+            </h3>
+            <div class="overflow-x-auto scrollbar">
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="text-[10px] uppercase tracking-wider text-zinc-500 border-b border-zinc-800">
+                    <th class="text-left font-medium py-2 pr-3">Agent</th>
+                    <th class="text-right font-medium py-2 pr-3">Decisions</th>
+                    <th class="text-right font-medium py-2 pr-3">LLM p50</th>
+                    <th class="text-right font-medium py-2 pr-3">LLM p95</th>
+                    <th class="text-left font-medium py-2 pr-3 pl-6">Top skills</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template x-for="row in perAgentRows" :key="row.slot">
+                    <tr class="border-b border-zinc-900">
+                      <td class="py-2 pr-3" :class="row.label.startsWith('蓝') ? 'text-blue-400' : 'text-red-400'" x-text="row.label"></td>
+                      <td class="py-2 pr-3 mono text-right text-zinc-300" x-text="row.decisions"></td>
+                      <td class="py-2 pr-3 mono text-right text-zinc-300" x-text="`${row.llm_latency_p50.toFixed(2)}s`"></td>
+                      <td class="py-2 pr-3 mono text-right text-zinc-400" x-text="`${row.llm_latency_p95.toFixed(2)}s`"></td>
+                      <td class="py-2 pr-3 pl-6 mono text-xs text-zinc-400">
+                        <template x-for="[name, count] in row.top_skills">
+                          <span class="inline-block mr-2"><span class="text-indigo-400" x-text="name"></span>·<span x-text="count"></span></span>
+                        </template>
+                      </td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+        </div>
+      </template>
+    </section>
+  </main>
+
+  <!-- New Run modal -->
+  <div x-show="newRunModalOpen" x-transition.opacity
+       class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+       @click.self="newRunModalOpen = false" style="display: none;">
+    <div class="card w-full max-w-md p-6" @click.stop>
+      <div class="flex items-center justify-between mb-5">
+        <h3 class="text-lg font-semibold gradient-text">New eval run</h3>
+        <button @click="newRunModalOpen = false" class="text-zinc-500 hover:text-zinc-200 text-xl leading-none">&times;</button>
+      </div>
+      <form @submit.prevent="submitRun()" class="space-y-4">
+        <div>
+          <label class="block text-xs uppercase tracking-wider text-zinc-500 mb-1.5">N episodes</label>
+          <input type="number" min="1" max="50" x-model.number="newRun.n_episodes"
+                 class="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-sm mono focus:outline-none focus:border-indigo-500" />
+        </div>
+        <div>
+          <label class="block text-xs uppercase tracking-wider text-zinc-500 mb-1.5">Scenario</label>
+          <input type="text" x-model="newRun.scenario"
+                 class="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-sm mono focus:outline-none focus:border-indigo-500" />
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs uppercase tracking-wider text-zinc-500 mb-1.5">Max wall (s)</label>
+            <input type="number" min="10" max="10800" x-model.number="newRun.max_wall_seconds"
+                   class="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-sm mono focus:outline-none focus:border-indigo-500" />
+            <div class="text-[10px] text-zinc-600 mt-1">5400 = 90 分钟(整场)</div>
+          </div>
+          <div>
+            <label class="block text-xs uppercase tracking-wider text-zinc-500 mb-1.5">Wall fps (1:1)</label>
+            <input type="number" min="0" max="240" x-model.number="newRun.target_wall_fps"
+                   class="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-sm mono focus:outline-none focus:border-indigo-500" />
+            <div class="text-[10px] text-zinc-600 mt-1">50 = 1:1 实时;0 = 不限速</div>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs uppercase tracking-wider text-zinc-500 mb-1.5">Obs refresh ticks</label>
+            <input type="number" min="1" max="100" x-model.number="newRun.obs_refresh_every_ticks"
+                   class="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-sm mono focus:outline-none focus:border-indigo-500" />
+            <div class="text-[10px] text-zinc-600 mt-1">25 = 每 0.5s 同步快照</div>
+          </div>
+          <div>
+            <label class="block text-xs uppercase tracking-wider text-zinc-500 mb-1.5">Pitch fps</label>
+            <input type="number" min="1" max="50" x-model.number="newRun.tick_stream_every_ticks"
+                   class="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-sm mono focus:outline-none focus:border-indigo-500" />
+            <div class="text-[10px] text-zinc-600 mt-1">5 = 每 100ms 推一帧位置</div>
+          </div>
+        </div>
+        <div class="flex items-center gap-4 pt-1">
+          <label class="flex items-center gap-2 text-sm text-zinc-300">
+            <input type="checkbox" x-model="newRun.render"
+                   class="w-4 h-4 rounded bg-zinc-900 border-zinc-700 text-indigo-500 focus:ring-indigo-500" />
+            Render gfootball 3D 窗口
+          </label>
+          <label class="flex items-center gap-2 text-sm text-zinc-400">
+            <span class="text-xs uppercase tracking-wider">N episodes</span>
+            <input type="number" min="1" max="50" x-model.number="newRun.n_episodes"
+                   class="w-16 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm mono focus:outline-none focus:border-indigo-500" />
+          </label>
+        </div>
+        <div class="text-[11px] text-zinc-500 leading-relaxed pt-1">
+          默认 = 1 局 90 分钟实时(5400s wall)。中途想停按右上"停止"按钮。
+        </div>
+        <div class="flex justify-end gap-2 pt-2">
+          <button type="button" @click="newRunModalOpen = false"
+                  class="px-4 py-2 text-sm text-zinc-400 hover:text-zinc-200 transition">Cancel</button>
+          <button type="submit" :disabled="creating"
+                  class="px-4 py-2 text-sm font-medium bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 transition rounded-lg">
+            <span x-show="!creating">Start run</span>
+            <span x-show="creating">Starting...</span>
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    function academyApp() {
+      return {
+        runs: [],
+        selectedRunId: null,
+        runDetail: null,
+        selectedEpisodeIdx: null,
+        liveFeed: [],
+        liveCount: 0,
+        skillChart: null,
+        perAgentRows: [],
+        ws: null,
+        newRunModalOpen: false,
+        creating: false,
+        newRun: {
+          n_episodes: 1,
+          scenario: 'llm_5v5_full',
+          max_decisions_total: 100000,
+          max_wall_seconds: 5400.0,
+          obs_refresh_every_ticks: 25,
+          target_wall_fps: 50.0,
+          tick_stream_every_ticks: 5,
+          frame_stream_every_ticks: 3,
+          render: true,
+        },
+        lastTick: null,
+        stopping: false,
+        viewMode: '3d',  // '3d' = MJPEG video; '2d' = SVG top-down
+        videoError: false,
+        // Kickoff-wait banner state. Driven by the runner's
+        // ("waiting_for_kickoff", {ready, total, ...}) status events.
+        // Reset on selectRun(); cleared when "kickoff" arrives.
+        kickoffWait: null,  // {ready, total, timeout_seconds} | null
+        get videoStreamUrl() {
+          // Append a cache-bust so re-selecting a run reconnects the stream.
+          return this.selectedRunId
+            ? `/stream/${this.selectedRunId}?t=${this.selectedRunId}`
+            : '';
+        },
+        pollHandle: null,
+
+        async boot() {
+          await this.refreshRuns();
+          this.pollHandle = setInterval(() => this.refreshRuns(), 4000);
+        },
+
+        async refreshRuns() {
+          try {
+            const r = await fetch('/api/runs');
+            this.runs = await r.json();
+            // Auto-refresh detail if currently selected
+            if (this.selectedRunId && this.runDetail && this.runDetail.status === 'running') {
+              await this.loadRunDetail(this.selectedRunId, /*keepFeed*/ true);
+            }
+          } catch (e) { console.error(e); }
+        },
+
+        async selectRun(runId) {
+          this.selectedRunId = runId;
+          this.liveFeed = [];
+          this.liveCount = 0;
+          this.lastTick = null;
+          this.stopping = false;
+          this.videoError = false;
+          this.kickoffWait = null;
+          // Default view: 3D when this run actually rendered; 2D otherwise.
+          this.selectedEpisodeIdx = null;
+          await this.loadRunDetail(runId);
+          this.viewMode = this.runDetail?.config?.render ? '3d' : '2d';
+          this.openWs(runId);
+        },
+
+        async stopRun() {
+          if (!this.selectedRunId) return;
+          this.stopping = true;
+          try {
+            await fetch(`/api/runs/${this.selectedRunId}/stop`, {method: 'POST'});
+          } catch (e) {
+            console.error(e);
+          }
+          // status flips to 'completed' via run_end event; reset stopping there
+        },
+
+        formatGameClock(envTick) {
+          // gfootball: pps=2 → 1 env tick = 0.02 game-sec (50 ticks/sec game time)
+          const sec = envTick / 50;
+          const m = Math.floor(sec / 60);
+          const s = Math.floor(sec % 60);
+          return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+        },
+
+        async loadRunDetail(runId, keepFeed = false) {
+          const r = await fetch(`/api/runs/${runId}`);
+          if (!r.ok) return;
+          this.runDetail = await r.json();
+          // Use latest episode for charts (or keep current selection if loaded explicitly)
+          const eps = this.runDetail.episodes ?? [];
+          if (eps.length > 0 && !this.selectedEpisodeIdx) {
+            await this.renderEpisode(eps[eps.length - 1]);
+          }
+        },
+
+        async loadEpisode(epIdx) {
+          this.selectedEpisodeIdx = epIdx;
+          // Find summary in meta
+          const ep = (this.runDetail.episodes ?? []).find(e => e.ep_index === epIdx);
+          if (ep) await this.renderEpisode(ep);
+        },
+
+        async renderEpisode(ep) {
+          const summary = ep.summary;
+          this.perAgentRows = summary.per_agent ?? [];
+          // Wait for Alpine to render the canvas template before drawing.
+          await this.$nextTick();
+          this.drawSkillChart(summary.skill_distribution ?? {});
+        },
+
+        drawSkillChart(dist) {
+          const labels = Object.keys(dist);
+          const data = Object.values(dist);
+          const ctx = document.getElementById('skillChart');
+          if (!ctx) {
+            // Canvas not in DOM yet — try once more after a paint.
+            requestAnimationFrame(() => {
+              const c2 = document.getElementById('skillChart');
+              if (c2) this._drawSkillChartOn(c2, labels, data);
+            });
+            return;
+          }
+          this._drawSkillChartOn(ctx, labels, data);
+        },
+
+        _drawSkillChartOn(ctx, labels, data) {
+          if (this.skillChart) this.skillChart.destroy();
+          this.skillChart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+              labels,
+              datasets: [{
+                data,
+                backgroundColor: '#818cf8',
+                borderRadius: 4,
+                borderSkipped: false,
+              }]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: { legend: { display: false } },
+              scales: {
+                x: {
+                  ticks: { color: '#a1a1aa', font: { family: 'JetBrains Mono', size: 11 } },
+                  grid: { display: false },
+                },
+                y: {
+                  ticks: { color: '#71717a', font: { family: 'JetBrains Mono', size: 11 }, beginAtZero: true },
+                  grid: { color: '#27272a' },
+                }
+              }
+            }
+          });
+        },
+
+        openWs(runId) {
+          if (this.ws) { try { this.ws.close(); } catch (_) {} }
+          const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+          const url = `${proto}://${location.host}/ws/runs/${runId}`;
+          this.ws = new WebSocket(url);
+          this.ws.onmessage = (msg) => {
+            const evt = JSON.parse(msg.data);
+            this.handleEvent(evt);
+          };
+          this.ws.onclose = () => { /* server killed it; will reopen on selectRun */ };
+        },
+
+        handleEvent(evt) {
+          if (evt.type === 'decision') {
+            this.liveFeed.push(evt);
+            if (this.liveFeed.length > 200) this.liveFeed = this.liveFeed.slice(-200);
+            this.liveCount += 1;
+          } else if (evt.type === 'tick') {
+            // Live position snapshot — drives the pitch view.
+            this.lastTick = evt;
+          } else if (evt.type === 'status') {
+            // Runner phase events. Two phases drive the kickoff banner:
+            //   "waiting_for_kickoff" → show "等待 N 个 LLM 准备开球..."
+            //   "kickoff"             → hide banner; env starts ticking now
+            if (evt.phase === 'waiting_for_kickoff') {
+              this.kickoffWait = {
+                ready: evt.ready ?? 0,
+                total: evt.total ?? 0,
+                timeout_seconds: evt.timeout_seconds ?? null,
+              };
+            } else if (evt.phase === 'kickoff') {
+              this.kickoffWait = null;
+            }
+          } else if (evt.type === 'run_end') {
+            this.stopping = false;
+            this.kickoffWait = null;
+            this.refreshRuns();
+            if (this.selectedRunId) this.loadRunDetail(this.selectedRunId);
+          } else if (evt.type === 'episode_end') {
+            this.kickoffWait = null;
+            this.refreshRuns();
+            if (this.selectedRunId) this.loadRunDetail(this.selectedRunId);
+          } else if (evt.type === 'run_started') {
+            this.refreshRuns();
+            if (this.selectedRunId) this.loadRunDetail(this.selectedRunId);
+          }
+        },
+
+        renderSkill(s) {
+          if (!s) return '';
+          const name = s.tool_name || '?';
+          const args = [];
+          for (const k of ['target_x', 'target_y', 'target_player_id', 'target_zone', 'pass_type', 'urgency', 'opponent_id', 'entity_id', 'audience']) {
+            if (s[k] !== undefined && s[k] !== null) {
+              const v = (typeof s[k] === 'number') ? s[k].toFixed(2) : s[k];
+              args.push(`${k}=${v}`);
+            }
+          }
+          if (s.message) args.push(`msg=${JSON.stringify(s.message)}`);
+          return `${name}(${args.join(', ')})`;
+        },
+
+        async submitRun() {
+          this.creating = true;
+          try {
+            const r = await fetch('/api/runs', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify(this.newRun),
+            });
+            const data = await r.json();
+            this.newRunModalOpen = false;
+            await this.refreshRuns();
+            await this.selectRun(data.run_id);
+          } catch (e) {
+            alert('Failed: ' + e.message);
+          } finally {
+            this.creating = false;
+          }
+        },
+      };
+    }
+  </script>
+</body>
+</html>

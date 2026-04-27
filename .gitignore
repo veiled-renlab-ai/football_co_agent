@@ -28,3 +28,6 @@ Thumbs.db
 logs/
 runs/
 *.log
+
+# Eval platform generated data
+eval_runs/

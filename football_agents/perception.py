@@ -32,7 +32,9 @@ SIGHT_DISTANCE_MAX = 0.60    # DEPRECATED: no longer used as visibility gate.
                              # FOV is now the only filter; ATTENTION_CAP handles
                              # cognitive load. Kept as constant for backward-compat
                              # only — safe to remove once no callers reference it.
-ATTENTION_CAP = 7            # max entities a player can simultaneously track
+ATTENTION_CAP = 10           # max entities a player can simultaneously track
+                             # (5v5 极限: 4 队友 + 5 对手 + 1 球 = 10. 不再裁剪视野
+                             # 内的球员，让 LLM 看到所有可见的人。)
 SHORT_TERM_MEMORY_TICKS = 30 # ~3 seconds at 10 Hz env tick rate
 
 Team = Literal["team_a", "team_b"]

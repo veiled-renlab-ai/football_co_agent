@@ -127,7 +127,7 @@ def main() -> None:
 
     runner = MultiAgentRunner(
         env=env, agents=agents,
-        obs_refresh_every_ticks=4,
+        obs_refresh_every_ticks=25,  # ~500ms 同步快照 (50fps × 25 = 0.5s)
         max_decisions_total=400,
         max_wall_seconds=300.0,
         on_decision=on_decision,

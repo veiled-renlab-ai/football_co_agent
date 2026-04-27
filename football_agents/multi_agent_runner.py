@@ -139,11 +139,17 @@ class MultiAgentRunner:
         agents: list[PlayerAgent],
         *,
         fallback_policy: Optional[FallbackPolicy] = None,
-        obs_refresh_every_ticks: int = 4,
+        obs_refresh_every_ticks: int = 25,
         max_decisions_total: int = 200,
         max_wall_seconds: float = 300.0,
         target_wall_fps: float = 50.0,
         on_decision: Optional[Callable[[dict], None]] = None,
+        on_tick: Optional[Callable[[dict], None]] = None,
+        tick_stream_every_ticks: int = 5,
+        on_frame: Optional[Callable[[object], None]] = None,
+        frame_stream_every_ticks: int = 3,
+        on_status: Optional[Callable[[str, dict], None]] = None,
+        kickoff_wait_seconds: float = 8.0,
     ) -> None:
         """
         Game-time pace is controlled by gfootball's `physics_steps_per_frame`
@@ -192,10 +198,35 @@ class MultiAgentRunner:
             1.0 / target_wall_fps if target_wall_fps and target_wall_fps > 0 else 0.0
         )
         self._on_decision_cb = on_decision
+        self._on_tick_cb = on_tick
+        self._tick_stream_every = max(1, int(tick_stream_every_ticks))
+        self._last_tick_stream: int = -10**9
+        # Frame stream (for embedding gfootball's 3D render in the UI).
+        # Only meaningful when env was constructed with render=True.
+        self._on_frame_cb = on_frame
+        self._frame_stream_every = max(1, int(frame_stream_every_ticks))
+        self._last_frame_stream: int = -10**9
+        # Status stream (phase events: "waiting_for_kickoff", "kickoff", ...).
+        # The harness already wires "starting" / "running" / "finished"; the
+        # runner now adds finer-grained phase events between starting and
+        # running.
+        self._on_status_cb = on_status
+        # Hard cap on the pre-kickoff wait. env.tick is NOT advanced during
+        # the wait, so this only delays wall-clock — never the game.
+        self._kickoff_wait_seconds = max(0.0, float(kickoff_wait_seconds))
 
         self._decisions_completed: int = 0
         self._decision_log: list[dict] = []
         self._stop_flag = threading.Event()
+
+    def request_stop(self) -> None:
+        """External signal to break out of the run loop on the next tick.
+
+        Thread-safe — `_stop_flag` is a `threading.Event`. The runner checks
+        it once per env tick, so worst-case latency is one frame (~20ms at
+        50 fps).
+        """
+        self._stop_flag.set()
 
     # ---- per-agent helpers -------------------------------------------
 
@@ -243,6 +274,131 @@ class MultiAgentRunner:
             from_llm=False,
         )
 
+    # ---- pre-kickoff wait --------------------------------------------
+
+    def _emit_status(self, phase: str, payload: dict) -> None:
+        """Best-effort status emit. Same signature as harness on_status."""
+        if self._on_status_cb is None:
+            return
+        try:
+            self._on_status_cb(phase, payload)
+        except Exception as e:
+            logger.warning("on_status callback raised: %s", e)
+
+    def _wait_for_kickoff(self) -> None:
+        """Block until every agent has produced its first LLM skill, or
+        until self._kickoff_wait_seconds elapses — whichever comes first.
+
+        IMPORTANT INVARIANTS:
+          - env.step_actions is NEVER called here. env.tick stays at 0.
+            The wait only consumes wall-clock, not game-clock.
+          - Skills that arrive during the wait ARE installed via
+            agent.install_skill(...) (from_llm=True), so the body is
+            already armed with each LLM's first intent when env.step
+            begins firing in the main loop.
+          - For agents whose worker hasn't returned a skill by the
+            timeout, we leave the per-persona fallback (already armed
+            in run() step 1) in place. A single hung LLM does NOT
+            block the rest of the match.
+        """
+        if self._kickoff_wait_seconds <= 0.0 or not self.agents:
+            self._emit_status("kickoff", {
+                "ready": len(self.agents),
+                "total": len(self.agents),
+                "wait_seconds": 0.0,
+                "timed_out": False,
+            })
+            return
+
+        n_total = len(self.agents)
+        ready: set[int] = set()  # agent slots that have produced a skill
+        wait_start = time.monotonic()
+        last_progress_emit = -1
+
+        # Initial status so the UI can show the banner immediately.
+        self._emit_status("waiting_for_kickoff", {
+            "ready": 0,
+            "total": n_total,
+            "timeout_seconds": self._kickoff_wait_seconds,
+        })
+
+        # Poll every 50ms — fast enough that ready-count progress feels
+        # live, slow enough that we don't burn a CPU.
+        poll_dt = 0.05
+        while True:
+            for a in self.agents:
+                if a.slot in ready:
+                    continue
+                item = a.try_pop_skill()
+                if item is None:
+                    continue
+                skill, llm_dt, obs_tick = item
+                # Install the LLM's first decision so the body uses it
+                # from env.tick=0 onward (replacing the fallback that
+                # was armed in run() step 1).
+                a.install_skill(
+                    skill,
+                    tick=self.env.tick,  # always 0 here
+                    raw_obs=self.env.raw_obs_for_slot(a.slot),
+                    from_llm=True,
+                )
+                self._decisions_completed += 1
+                log_entry = {
+                    "decision": self._decisions_completed,
+                    "player_id": a.player_id,
+                    "slot": a.slot,
+                    "env_tick": self.env.tick,
+                    "obs_tick": obs_tick,
+                    "lag_ticks": self.env.tick - obs_tick,
+                    "llm_seconds": llm_dt,
+                    "skill": skill,
+                }
+                self._decision_log.append(log_entry)
+                if self._on_decision_cb is not None:
+                    try:
+                        self._on_decision_cb(log_entry)
+                    except Exception as e:
+                        logger.warning("on_decision callback raised: %s", e)
+                ready.add(a.slot)
+
+            # Emit progress when ready count changes.
+            if len(ready) != last_progress_emit:
+                self._emit_status("waiting_for_kickoff", {
+                    "ready": len(ready),
+                    "total": n_total,
+                    "timeout_seconds": self._kickoff_wait_seconds,
+                })
+                last_progress_emit = len(ready)
+
+            if len(ready) >= n_total:
+                break
+            if self._stop_flag.is_set():
+                break
+            if time.monotonic() - wait_start >= self._kickoff_wait_seconds:
+                break
+            time.sleep(poll_dt)
+
+        elapsed = time.monotonic() - wait_start
+        timed_out = len(ready) < n_total
+        if timed_out:
+            missing = [a.slot for a in self.agents if a.slot not in ready]
+            logger.warning(
+                "Kickoff after timeout, %d/%d agents ready (slots without "
+                "first LLM decision, falling back: %s); waited %.2fs",
+                len(ready), n_total, missing, elapsed,
+            )
+        else:
+            logger.info(
+                "All %d agents ready, kicking off. (waited %.2fs)",
+                n_total, elapsed,
+            )
+        self._emit_status("kickoff", {
+            "ready": len(ready),
+            "total": n_total,
+            "wait_seconds": elapsed,
+            "timed_out": timed_out,
+        })
+
     # ---- main loop ---------------------------------------------------
 
     def run(self) -> dict:
@@ -264,19 +420,28 @@ class MultiAgentRunner:
             if i < len(self.agents) - 1:
                 time.sleep(0.05)
 
+        # 2b. WAIT FOR KICKOFF — block until every agent has produced its
+        #     first LLM-decided skill, OR the wall-clock cap fires. While
+        #     we wait, env.step is NEVER called → env.tick stays at 0 and
+        #     the simulator does not advance. The fallback that was armed
+        #     in step 1 is what would run if we didn't wait; the whole
+        #     point of this phase is to install LLM intents BEFORE the
+        #     first env.step so kickoff doesn't look identical every match.
+        self._wait_for_kickoff()
+
         wall_start = time.monotonic()
         last_tick_wall = time.monotonic()
         # Initial last-push-tick; vary by agent so refresh cadence stays staggered
         # even after the startup jitter.
-        # KEYED BY SLOT (not player_id) — player_id is per-team-relative
-        # (left team has pids 0-4, right team also has pids 0-4), so keying
-        # by player_id would let blue and red collide on the same key. The
-        # team that iterates first wins every push and the other team's obs
-        # queue never refreshes → only first decision ever fires.
-        # slot is globally unique (0..n_total-1).
+        # KEYED BY SLOT (not player_id) — slot is globally unique (0..n_total-1).
+        # SYNCHRONIZED PUSH: all agents pushed on the same tick, so every LLM sees
+        # a consistent global snapshot at the same moment. (Old code staggered the
+        # init by `i * refresh / N` to spread API requests in time, but staggered
+        # snapshots break team coordination — agents reasoning off slightly different
+        # world states. Startup jitter in PlayerAgent.start() (50ms × i) still
+        # spreads the initial API burst.)
         last_obs_push_tick: dict[int, int] = {
-            a.slot: -((i * self.obs_refresh_every_ticks) // max(1, len(self.agents)))
-            for i, a in enumerate(self.agents)
+            a.slot: -self.obs_refresh_every_ticks for a in self.agents
         }
 
         try:
@@ -319,6 +484,8 @@ class MultiAgentRunner:
                 # ---- 2. Termination ----
                 if self.env.done:
                     break
+                if self._stop_flag.is_set():
+                    break
                 if self._decisions_completed >= self.max_decisions_total:
                     break
                 if time.monotonic() - wall_start >= self.max_wall_seconds:
@@ -344,16 +511,79 @@ class MultiAgentRunner:
                         a.push_observation(obs)
                         last_obs_push_tick[a.slot] = self.env.tick
 
+                # ---- 5c. Stream rendered 3D frame to UI (when render=True) ----
+                if (self._on_frame_cb is not None
+                        and self.env.tick - self._last_frame_stream >= self._frame_stream_every):
+                    frame = self.env.latest_frame
+                    if frame is not None:
+                        self._last_frame_stream = self.env.tick
+                        try:
+                            self._on_frame_cb(frame)
+                        except Exception as e:
+                            logger.warning("on_frame callback raised: %s", e)
+
+                # ---- 5b. Stream raw position snapshot to UI (live pitch view) ----
+                if (self._on_tick_cb is not None
+                        and self.env.tick - self._last_tick_stream >= self._tick_stream_every):
+                    self._last_tick_stream = self.env.tick
+                    try:
+                        raw = self.env.raw_obs
+                        snap = {
+                            "env_tick": self.env.tick,
+                            "left_team": [[float(p[0]), float(p[1])] for p in raw["left_team"]],
+                            "right_team": [[float(p[0]), float(p[1])] for p in raw["right_team"]],
+                            "ball": [float(raw["ball"][0]), float(raw["ball"][1])],
+                            "ball_owned_team": int(raw.get("ball_owned_team", -1)),
+                            "ball_owned_player": int(raw.get("ball_owned_player", -1)),
+                            "score_left": int(raw.get("score", [0, 0])[0]),
+                            "score_right": int(raw.get("score", [0, 0])[1]),
+                            "game_mode": int(raw.get("game_mode", 0)),
+                        }
+                        self._on_tick_cb(snap)
+                    except Exception as e:
+                        logger.warning("on_tick callback raised: %s", e)
+
                 # ---- 6. Cap wall-clock tick rate for game=wall alignment ----
                 # With default pps=2 + 50 fps wall cap: 50*2*0.01 = 1.0 game
                 # sec / wall sec exactly. 50 fps is smooth enough to not feel
                 # choppy. Disable by constructing with target_wall_fps=0.
+                #
+                # DEADLINE-CARRY PACING (fixed 2026-04): the previous code
+                # measured `elapsed = now - last_tick_wall` and reset
+                # `last_tick_wall = now` AFTER sleep. On Linux time.sleep()
+                # routinely overshoots by 0.5–2ms; resetting the baseline
+                # after sleep BAKES that overshoot into every subsequent
+                # tick — at 50 fps × 1ms overshoot = 50ms drift per second
+                # (~5% slow). Verified on WSL: ratio measured 0.91 with
+                # the old code instead of 1.00.
+                #
+                # Fix: track the next ABSOLUTE deadline. Each tick's target
+                # is `last_tick_wall + target_tick_dt` regardless of how
+                # long the previous tick / sleep took. Overshoot in tick N
+                # is compensated by less sleep in tick N+1, so over time
+                # the average pace stays exactly at target_wall_fps.
+                #
+                # If we're chronically slipping (work + sleep > tick_dt),
+                # we still don't sleep, but we resync the deadline so we
+                # don't accumulate unbounded debt that would later cause
+                # a long no-sleep burst when load drops. Threshold: 3
+                # tick periods of slip → declare hopeless and resync.
                 if self._target_tick_dt > 0:
-                    elapsed = time.monotonic() - last_tick_wall
-                    sleep_for = self._target_tick_dt - elapsed
+                    next_deadline = last_tick_wall + self._target_tick_dt
+                    now = time.monotonic()
+                    sleep_for = next_deadline - now
                     if sleep_for > 0:
                         time.sleep(sleep_for)
-                    last_tick_wall = time.monotonic()
+                        last_tick_wall = next_deadline
+                    elif sleep_for > -3.0 * self._target_tick_dt:
+                        # Mild slip — let the deadline carry forward so
+                        # the next-faster tick can catch up.
+                        last_tick_wall = next_deadline
+                    else:
+                        # Hopeless slip (loop is structurally too slow for
+                        # the configured fps); resync to now so we don't
+                        # build unbounded debt.
+                        last_tick_wall = now
         finally:
             self._stop_flag.set()
             for a in self.agents:

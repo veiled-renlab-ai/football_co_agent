@@ -207,6 +207,19 @@ class FootballEnvAdapter:
             raise RuntimeError("Call reset() first.")
         return self._raw_obs
 
+    @property
+    def latest_frame(self):
+        """The most recent rendered frame as a (H, W, 3) uint8 RGB ndarray, or None.
+
+        Only populated when the env was constructed with `render=True` (which
+        triggers gfootball's renderer; with $DISPLAY unset it falls back to EGL
+        off-screen, perfect for embedding the view in a web UI without opening
+        a native window). Reads `obs['frame']` from the canonical god-view obs.
+        """
+        if self._raw_obs is None:
+            return None
+        return self._raw_obs.get("frame")
+
     def step_action(self, action: int) -> None:
         """Public: step the env once with the given atomic gfootball action id.
 
