@@ -7,6 +7,8 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.13.5/dist/cdn.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.148.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.148.0/examples/js/controls/OrbitControls.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
   <style>
@@ -44,6 +46,9 @@
     @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
     .feed-row { animation: slide-in 0.25s ease-out; }
     @keyframes slide-in { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: translateX(0); } }
+    .scoreboard { background: linear-gradient(105deg, rgba(59,130,246,0.1) 0%, transparent 38%, transparent 62%, rgba(239,68,68,0.1) 100%); border: 1px solid rgba(99,102,241,0.22); }
+    .score-num { text-shadow: 0 0 28px currentColor, 0 0 56px currentColor; letter-spacing: -0.02em; }
+    .pitch-outer { background: #0a3318; }
   </style>
 </head>
 <body class="min-h-screen" x-data="academyApp()" x-init="boot()">
@@ -55,12 +60,12 @@
         <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-fuchsia-500 flex items-center justify-center font-bold text-sm">A</div>
         <div>
           <div class="text-lg font-semibold tracking-tight gradient-text">ACADEMY</div>
-          <div class="text-xs text-zinc-500 -mt-0.5">5v5 LLM agent eval</div>
+          <div class="text-xs text-zinc-500 -mt-0.5">11v11 LLM agent eval</div>
         </div>
       </div>
       <div class="flex items-center gap-3">
         <div class="text-xs text-zinc-500 mono" x-text="`${runs.length} runs`"></div>
-        <button @click="newRunModalOpen = true"
+        <button @click="openNewRun()"
                 class="px-3.5 py-1.5 text-sm font-medium bg-indigo-600 hover:bg-indigo-500 transition-colors rounded-lg flex items-center gap-1.5">
           <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14" stroke-linecap="round"/></svg>
           New Run
@@ -132,48 +137,103 @@
 
           <!-- Header card -->
           <div class="card glow p-5 mb-5">
-            <div class="flex items-start justify-between mb-4">
-              <div>
-                <div class="flex items-center gap-2 mb-1">
-                  <span class="text-xs text-zinc-500 mono" x-text="runDetail.run_id"></span>
-                  <span class="pill" :class="`pill-${runDetail.status}`">
-                    <span x-show="runDetail.status === 'running'" class="w-1.5 h-1.5 rounded-full bg-indigo-400 pulse-dot"></span>
-                    <span x-text="runDetail.status"></span>
-                  </span>
-                </div>
-                <h2 class="text-xl font-semibold" x-text="runDetail.config.scenario"></h2>
-                <div class="text-xs text-zinc-500 mt-1">
-                  <span x-text="`${runDetail.completed_episodes}/${runDetail.n_episodes} episodes`"></span>
-                  <span class="mx-2">·</span>
-                  <span x-text="`${runDetail.config.max_decisions_total} max decisions`"></span>
-                  <span class="mx-2">·</span>
-                  <span x-text="`${runDetail.config.max_wall_seconds}s wall cap`"></span>
-                </div>
+
+            <!-- Run meta row -->
+            <div class="flex items-center justify-between mb-4">
+              <div class="flex items-center gap-2 min-w-0">
+                <span class="text-xs text-zinc-600 mono truncate" x-text="runDetail.run_id"></span>
+                <span class="text-zinc-700 shrink-0">·</span>
+                <span class="text-xs font-medium text-zinc-400 truncate" x-text="runDetail.config.scenario"></span>
               </div>
-              <!-- Score + stop -->
-              <div class="text-right flex items-start gap-3">
-                <div>
-                  <div class="text-[10px] uppercase tracking-wider text-zinc-500">Aggregate</div>
-                  <div class="mono text-2xl font-bold mt-1">
-                    <span class="text-blue-400" x-text="runDetail.aggregate.blue_wins ?? 0"></span>
-                    <span class="text-zinc-600 mx-1">·</span>
-                    <span class="text-zinc-400" x-text="runDetail.aggregate.draws ?? 0"></span>
-                    <span class="text-zinc-600 mx-1">·</span>
-                    <span class="text-red-400" x-text="runDetail.aggregate.red_wins ?? 0"></span>
+              <span class="pill shrink-0 ml-3" :class="`pill-${runDetail.status}`">
+                <span x-show="runDetail.status === 'running'" class="w-1.5 h-1.5 rounded-full bg-indigo-400 pulse-dot"></span>
+                <span x-text="runDetail.status"></span>
+              </span>
+            </div>
+
+            <!-- Fantasy scoreboard -->
+            <div class="scoreboard rounded-2xl overflow-hidden mb-5">
+              <div class="flex items-center px-6 py-5">
+
+                <!-- Blue team badge -->
+                <div class="flex-1 flex items-center gap-3 min-w-0">
+                  <div class="w-12 h-12 rounded-xl shrink-0 flex items-center justify-center font-black text-xl text-blue-200"
+                       style="background:rgba(59,130,246,0.18);border:1px solid rgba(59,130,246,0.45);text-shadow:0 0 14px rgba(96,165,250,0.9)">蓝</div>
+                  <div class="min-w-0">
+                    <div class="text-sm font-bold tracking-widest text-blue-400 uppercase">Blue</div>
+                    <div class="text-[11px] text-zinc-600 mt-0.5">← 左向右进攻</div>
                   </div>
-                  <div class="text-[10px] text-zinc-500 mt-0.5">蓝 · 平 · 红</div>
+                </div>
+
+                <!-- Score + clock center -->
+                <div class="flex flex-col items-center gap-1.5 px-6 shrink-0">
+                  <div class="flex items-center gap-5">
+                    <span class="score-num mono font-black leading-none tabular-nums text-blue-400"
+                          style="font-size:3.4rem"
+                          x-text="lastTick?.score_left ?? 0"></span>
+                    <span class="text-zinc-600 font-extralight select-none" style="font-size:2rem">:</span>
+                    <span class="score-num mono font-black leading-none tabular-nums text-red-400"
+                          style="font-size:3.4rem"
+                          x-text="lastTick?.score_right ?? 0"></span>
+                  </div>
+                  <!-- Game clock -->
+                  <div class="flex items-center gap-1.5">
+                    <span x-show="runDetail.status === 'running' && lastTick"
+                          class="w-1.5 h-1.5 rounded-full bg-emerald-400 pulse-dot shrink-0"></span>
+                    <span class="mono text-sm font-bold tracking-widest"
+                          :class="lastTick ? 'text-zinc-100' : 'text-zinc-600'"
+                          x-text="lastTick ? formatGameClock(lastTick.env_tick) : '--:--'"></span>
+                    <span class="text-[11px] text-zinc-600">/ 90:00</span>
+                  </div>
+                  <!-- Aggregate record -->
+                  <div class="flex items-center gap-1 text-[11px] text-zinc-500">
+                    <span class="mono font-bold text-blue-400" x-text="runDetail.aggregate.blue_wins ?? 0"></span>
+                    <span class="text-zinc-600">W</span>
+                    <span class="text-zinc-700 mx-0.5">·</span>
+                    <span class="mono font-bold text-zinc-400" x-text="runDetail.aggregate.draws ?? 0"></span>
+                    <span class="text-zinc-600">D</span>
+                    <span class="text-zinc-700 mx-0.5">·</span>
+                    <span class="mono font-bold text-red-400" x-text="runDetail.aggregate.red_wins ?? 0"></span>
+                    <span class="text-zinc-600">W</span>
+                    <span class="text-zinc-700 mx-1.5">│</span>
+                    <span class="text-zinc-600">EP</span>
+                    <span class="mono text-zinc-300 ml-0.5"
+                          x-text="`${runDetail.completed_episodes}/${runDetail.n_episodes}`"></span>
+                  </div>
+                </div>
+
+                <!-- Red team badge -->
+                <div class="flex-1 flex items-center justify-end gap-3 min-w-0">
+                  <div class="text-right min-w-0">
+                    <div class="text-sm font-bold tracking-widest text-red-400 uppercase">Red</div>
+                    <div class="text-[11px] text-zinc-600 mt-0.5">右向左进攻 →</div>
+                  </div>
+                  <div class="w-12 h-12 rounded-xl shrink-0 flex items-center justify-center font-black text-xl text-red-200"
+                       style="background:rgba(239,68,68,0.18);border:1px solid rgba(239,68,68,0.45);text-shadow:0 0 14px rgba(248,113,113,0.9)">红</div>
+                </div>
+
+              </div>
+              <!-- Scoreboard action bar -->
+              <div class="flex items-center justify-between px-5 py-2.5 border-t"
+                   style="border-color:rgba(99,102,241,0.15);background:rgba(0,0,0,0.25)">
+                <div class="flex items-center gap-2 text-[11px]">
+                  <span x-show="runDetail.status === 'running'" class="flex items-center gap-1.5 text-indigo-300">
+                    <span class="w-1.5 h-1.5 rounded-full bg-indigo-400 pulse-dot"></span>
+                    LIVE · <span class="mono" x-text="`${liveCount} decisions`"></span>
+                  </span>
+                  <span x-show="runDetail.status !== 'running'" class="text-zinc-600">比赛已结束</span>
                 </div>
                 <button x-show="runDetail.status === 'running'"
                         @click="stopRun()" :disabled="stopping"
-                        class="self-center px-3 py-1.5 text-xs font-medium bg-red-600 hover:bg-red-500 disabled:opacity-50 transition rounded-lg flex items-center gap-1.5">
-                  <svg class="w-3 h-3" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
-                  <span x-text="stopping ? '正在停止...' : '停止'"></span>
+                        class="px-3 py-1 text-xs font-medium bg-red-950/70 hover:bg-red-800 border border-red-700/50 disabled:opacity-50 transition rounded-full flex items-center gap-1.5">
+                  <svg class="w-2.5 h-2.5" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
+                  <span x-text="stopping ? '停止中...' : '终止比赛'"></span>
                 </button>
               </div>
             </div>
 
             <!-- Stat tiles -->
-            <div class="grid grid-cols-4 gap-3 mt-4">
+            <div class="grid grid-cols-4 gap-3">
               <div class="card bg-zinc-900 p-3">
                 <div class="text-[10px] uppercase tracking-wider text-zinc-500 mb-1">Avg score</div>
                 <div class="mono text-lg font-semibold">
@@ -200,11 +260,6 @@
               </div>
             </div>
 
-            <!-- Live decisions ticker -->
-            <div x-show="runDetail.status === 'running'" class="mt-4 flex items-center gap-2 text-xs text-indigo-300">
-              <span class="w-1.5 h-1.5 rounded-full bg-indigo-400 pulse-dot"></span>
-              Live · <span class="mono" x-text="`${liveCount} decisions streamed`"></span>
-            </div>
             <div x-show="runDetail.error" class="mt-3 px-3 py-2 rounded-lg bg-red-950/40 border border-red-900/50 text-sm text-red-300">
               <div class="font-semibold mb-0.5">Error</div>
               <div class="mono text-xs" x-text="runDetail.error"></div>
@@ -245,12 +300,14 @@
                   <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 pulse-dot"></span>
                   Live
                 </span>
-                <!-- View toggle: 3D video vs 2D SVG -->
-                <div class="flex bg-zinc-900 rounded-md p-0.5 ml-2 text-[11px]"
-                     x-show="runDetail.config?.render">
-                  <button @click="viewMode='3d'"
+                <!-- View toggle -->
+                <div class="flex bg-zinc-900 rounded-md p-0.5 ml-2 text-[11px]">
+                  <button @click="viewMode='three'"
+                          :class="viewMode==='three' ? 'bg-indigo-600 text-white' : 'text-zinc-400'"
+                          class="px-2 py-0.5 rounded transition">3D 自由</button>
+                  <button @click="viewMode='3d'" x-show="runDetail.config?.render"
                           :class="viewMode==='3d' ? 'bg-indigo-600 text-white' : 'text-zinc-400'"
-                          class="px-2 py-0.5 rounded transition">3D 视频</button>
+                          class="px-2 py-0.5 rounded transition">视频流</button>
                   <button @click="viewMode='2d'"
                           :class="viewMode==='2d' ? 'bg-indigo-600 text-white' : 'text-zinc-400'"
                           class="px-2 py-0.5 rounded transition">2D 俯视</button>
@@ -266,81 +323,238 @@
                 <span class="text-blue-400" x-text="lastTick?.score_left ?? 0"></span>:<span class="text-red-400" x-text="lastTick?.score_right ?? 0"></span>
               </div>
             </div>
-            <!-- 3D video stream (gfootball EGL render → MJPEG) -->
-            <div x-show="runDetail.config?.render && viewMode==='3d'"
-                 class="bg-black rounded-lg overflow-hidden">
+            <!-- Loading overlay: shown while gfootball env is cold-starting (~3–5s) -->
+            <div x-show="runDetail.status === 'running' && !lastTick"
+                 class="bg-zinc-900 rounded-lg flex items-center justify-center"
+                 style="aspect-ratio: 16/9;">
+              <div class="text-center">
+                <div class="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-3"></div>
+                <div class="text-sm text-zinc-300">正在启动 gfootball 环境…</div>
+                <div class="text-xs text-zinc-500 mt-1">冷启动约 3–5 秒</div>
+              </div>
+            </div>
+            <!-- 3D video stream (gfootball EGL render → MJPEG) + HUD overlay -->
+            <div x-show="runDetail.config?.render && viewMode==='3d' && !!lastTick"
+                 class="relative bg-black rounded-lg overflow-hidden">
               <img :src="videoStreamUrl"
                    :key="videoStreamUrl"
                    class="w-full block"
                    style="aspect-ratio: 16/9; object-fit: contain; background: #000;"
                    alt="gfootball live"
                    @error="videoError=true; viewMode='2d'"/>
+
+              <!-- ── Broadcast HUD overlay ── -->
+              <div class="absolute inset-x-0 top-0 pointer-events-none select-none">
+                <!-- Team color strip at very top -->
+                <div class="h-0.5" style="background:linear-gradient(90deg,rgba(59,130,246,0.95) 0%,rgba(59,130,246,0.95) 48.5%,rgba(255,255,255,0.15) 48.5%,rgba(255,255,255,0.15) 51.5%,rgba(239,68,68,0.95) 51.5%,rgba(239,68,68,0.95) 100%)"></div>
+
+                <!-- Main score bar -->
+                <div class="flex justify-center mt-2.5">
+                  <div class="inline-flex items-stretch rounded-xl overflow-hidden"
+                       style="background:rgba(6,6,10,0.80);backdrop-filter:blur(18px) saturate(1.5);border:1px solid rgba(255,255,255,0.08);box-shadow:0 6px 32px rgba(0,0,0,0.65),inset 0 1px 0 rgba(255,255,255,0.06)">
+
+                    <!-- Blue side -->
+                    <div class="flex items-center gap-2 pl-4 pr-3 py-2.5"
+                         style="background:rgba(59,130,246,0.16)">
+                      <div class="w-5 h-5 rounded flex items-center justify-center text-[10px] font-black text-blue-200"
+                           style="background:rgba(59,130,246,0.45);border:1px solid rgba(96,165,250,0.5)">蓝</div>
+                      <span class="text-blue-300 text-[11px] font-bold tracking-[0.18em] uppercase">BLUE</span>
+                    </div>
+
+                    <!-- Score -->
+                    <div class="flex items-center gap-3 px-5 py-2"
+                         style="border-left:1px solid rgba(255,255,255,0.07);border-right:1px solid rgba(255,255,255,0.07)">
+                      <span class="mono font-black leading-none tabular-nums text-blue-400"
+                            style="font-size:1.75rem;text-shadow:0 0 20px rgba(96,165,250,0.9)"
+                            x-text="lastTick?.score_left ?? 0"></span>
+                      <span class="text-zinc-600 font-extralight" style="font-size:1.1rem">:</span>
+                      <span class="mono font-black leading-none tabular-nums text-red-400"
+                            style="font-size:1.75rem;text-shadow:0 0 20px rgba(248,113,113,0.9)"
+                            x-text="lastTick?.score_right ?? 0"></span>
+                    </div>
+
+                    <!-- Red side -->
+                    <div class="flex items-center gap-2 pl-3 pr-4 py-2.5"
+                         style="background:rgba(239,68,68,0.16)">
+                      <span class="text-red-300 text-[11px] font-bold tracking-[0.18em] uppercase">RED</span>
+                      <div class="w-5 h-5 rounded flex items-center justify-center text-[10px] font-black text-red-200"
+                           style="background:rgba(239,68,68,0.45);border:1px solid rgba(248,113,113,0.5)">红</div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Clock + episode pill -->
+                <div class="flex justify-center mt-1.5">
+                  <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full"
+                       style="background:rgba(6,6,10,0.68);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,0.07);font-size:11px">
+                    <span x-show="runDetail.status === 'running'"
+                          class="w-1.5 h-1.5 rounded-full bg-emerald-400 pulse-dot shrink-0"></span>
+                    <span class="mono font-semibold tracking-widest text-zinc-200"
+                          x-text="formatGameClock(lastTick?.env_tick ?? 0)"></span>
+                    <span class="text-zinc-600">/</span>
+                    <span class="text-zinc-500">90:00</span>
+                    <span class="text-zinc-700 mx-0.5">│</span>
+                    <span class="text-zinc-500">EP</span>
+                    <span class="mono text-zinc-300 ml-0.5"
+                          x-text="`${runDetail.completed_episodes}/${runDetail.n_episodes}`"></span>
+                  </div>
+                </div>
+              </div>
+
               <div x-show="runDetail.status !== 'running'"
                    class="text-xs text-zinc-500 text-center py-2">
                 比赛已结束 —— 视频流停止。切到 2D 看最终位置。
               </div>
             </div>
-            <!-- 2D top-down SVG -->
-            <div x-show="!runDetail.config?.render || viewMode==='2d'"
-                 class="bg-emerald-950/60 rounded-lg p-1">
-              <svg viewBox="-110 -52 220 104" xmlns="http://www.w3.org/2000/svg" class="w-full block" style="aspect-ratio: 220/104;" preserveAspectRatio="xMidYMid meet">
-                <!-- pitch boundary -->
-                <rect x="-100" y="-42" width="200" height="84" fill="#14532d" stroke="#86efac" stroke-width="0.4"/>
-                <!-- halfway line + center circle + spot -->
-                <line x1="0" y1="-42" x2="0" y2="42" stroke="#86efac" stroke-width="0.3"/>
-                <circle cx="0" cy="0" r="9.15" fill="none" stroke="#86efac" stroke-width="0.3"/>
-                <circle cx="0" cy="0" r="0.4" fill="#86efac"/>
-                <!-- penalty boxes (approx, scaled gfootball coords) -->
-                <rect x="83" y="-19.7" width="17" height="39.4" fill="none" stroke="#86efac" stroke-width="0.25"/>
-                <rect x="-100" y="-19.7" width="17" height="39.4" fill="none" stroke="#86efac" stroke-width="0.25"/>
-                <!-- goal areas (smaller) -->
-                <rect x="93.5" y="-9.16" width="6.5" height="18.32" fill="none" stroke="#86efac" stroke-width="0.25"/>
-                <rect x="-100" y="-9.16" width="6.5" height="18.32" fill="none" stroke="#86efac" stroke-width="0.25"/>
-                <!-- goals (the actual posts y∈[-0.044, +0.044] = ±4.4 in our scale) -->
-                <rect x="100" y="-4.4" width="2" height="8.8" fill="#fde68a" stroke="#92400e" stroke-width="0.2"/>
-                <rect x="-102" y="-4.4" width="2" height="8.8" fill="#fde68a" stroke="#92400e" stroke-width="0.2"/>
+            <!-- Three.js 3D free-camera view -->
+            <div x-show="viewMode==='three'"
+                 class="relative rounded-lg overflow-hidden bg-zinc-950"
+                 style="aspect-ratio:16/9">
+              <canvas id="three-canvas" class="w-full h-full block" style="display:block"></canvas>
+              <!-- Camera presets -->
+              <div class="absolute bottom-3 left-1/2 -translate-x-1/2 flex gap-1.5 pointer-events-auto">
+                <template x-for="p in [{id:'broadcast',label:'广播'},{id:'top',label:'俯视'},{id:'side',label:'侧面'},{id:'follow',label:'跟球'}]" :key="p.id">
+                  <button @click="threeSetCamera(p.id)"
+                          :class="threeCam===p.id ? 'bg-indigo-600 text-white' : 'bg-zinc-800/80 text-zinc-300 hover:bg-zinc-700'"
+                          class="px-2.5 py-1 rounded text-[11px] font-medium backdrop-blur transition"
+                          x-text="p.label"></button>
+                </template>
+              </div>
+              <div class="absolute top-2 right-2 text-[10px] text-zinc-500 pointer-events-none select-none">拖拽旋转 · 滚轮缩放</div>
+            </div>
 
-                <!-- left team (蓝, 5 players: GK, RM, CF, LB, CB → indices 0-4) -->
+            <!-- 2D top-down pitch (enhanced) -->
+            <div x-show="viewMode==='2d' && !!lastTick"
+                 class="pitch-outer rounded-xl overflow-hidden">
+              <svg viewBox="-110 -52 220 104" xmlns="http://www.w3.org/2000/svg" class="w-full block" style="aspect-ratio:220/104" preserveAspectRatio="xMidYMid meet">
+                <defs>
+                  <pattern id="gp" x="-100" y="-42" width="20" height="84" patternUnits="userSpaceOnUse">
+                    <rect width="10" height="84" fill="#0f4d1e"/>
+                    <rect x="10" width="10" height="84" fill="#0b3d17"/>
+                  </pattern>
+                  <filter id="glow-b" x="-50%" y="-50%" width="200%" height="200%">
+                    <feGaussianBlur stdDeviation="1.2" result="blur"/>
+                    <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+                  </filter>
+                  <filter id="glow-r" x="-50%" y="-50%" width="200%" height="200%">
+                    <feGaussianBlur stdDeviation="1.2" result="blur"/>
+                    <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+                  </filter>
+                  <filter id="ball-glow" x="-100%" y="-100%" width="300%" height="300%">
+                    <feGaussianBlur stdDeviation="2" result="blur"/>
+                    <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+                  </filter>
+                </defs>
+
+                <!-- Grass stripes -->
+                <rect x="-100" y="-42" width="200" height="84" fill="url(#gp)"/>
+                <!-- Pitch outline -->
+                <rect x="-100" y="-42" width="200" height="84" fill="none" stroke="#22c55e" stroke-width="0.5" opacity="0.55"/>
+                <!-- Halfway line -->
+                <line x1="0" y1="-42" x2="0" y2="42" stroke="#22c55e" stroke-width="0.35" opacity="0.5"/>
+                <!-- Center circle -->
+                <circle cx="0" cy="0" r="9.15" fill="none" stroke="#22c55e" stroke-width="0.35" opacity="0.45"/>
+                <!-- Center spot -->
+                <circle cx="0" cy="0" r="0.6" fill="#22c55e" opacity="0.7"/>
+                <!-- Penalty boxes -->
+                <rect x="83" y="-20.1" width="17" height="40.2" fill="none" stroke="#22c55e" stroke-width="0.3" opacity="0.45"/>
+                <rect x="-100" y="-20.1" width="17" height="40.2" fill="none" stroke="#22c55e" stroke-width="0.3" opacity="0.45"/>
+                <!-- Goal areas -->
+                <rect x="93.5" y="-9.3" width="6.5" height="18.6" fill="none" stroke="#22c55e" stroke-width="0.25" opacity="0.35"/>
+                <rect x="-100" y="-9.3" width="6.5" height="18.6" fill="none" stroke="#22c55e" stroke-width="0.25" opacity="0.35"/>
+                <!-- Penalty spots -->
+                <circle cx="88" cy="0" r="0.55" fill="#22c55e" opacity="0.6"/>
+                <circle cx="-88" cy="0" r="0.55" fill="#22c55e" opacity="0.6"/>
+                <!-- Penalty arcs (D outside box) -->
+                <path d="M 83,-16.5 A 17,17 0 0,0 83,16.5" fill="none" stroke="#22c55e" stroke-width="0.3" opacity="0.4"/>
+                <path d="M -83,16.5 A 17,17 0 0,0 -83,-16.5" fill="none" stroke="#22c55e" stroke-width="0.3" opacity="0.4"/>
+                <!-- Corner arcs -->
+                <path d="M 98,-42 A 2,2 0 0,1 100,-40" fill="none" stroke="#22c55e" stroke-width="0.25" opacity="0.4"/>
+                <path d="M 100,40 A 2,2 0 0,1 98,42" fill="none" stroke="#22c55e" stroke-width="0.25" opacity="0.4"/>
+                <path d="M -100,-40 A 2,2 0 0,1 -98,-42" fill="none" stroke="#22c55e" stroke-width="0.25" opacity="0.4"/>
+                <path d="M -98,42 A 2,2 0 0,1 -100,40" fill="none" stroke="#22c55e" stroke-width="0.25" opacity="0.4"/>
+                <!-- Goals (net area) -->
+                <rect x="100" y="-4.4" width="2.5" height="8.8" fill="rgba(253,230,138,0.08)" stroke="#fde68a" stroke-width="0.45" opacity="0.8"/>
+                <rect x="-102.5" y="-4.4" width="2.5" height="8.8" fill="rgba(253,230,138,0.08)" stroke="#fde68a" stroke-width="0.45" opacity="0.8"/>
+
+                <!-- Blue team players -->
                 <template x-for="(p, i) in (lastTick?.left_team ?? [])" :key="`L${i}`">
                   <g>
-                    <circle :cx="p[0]*100" :cy="p[1]*100"
-                            :r="(lastTick?.ball_owned_team === 0 && lastTick?.ball_owned_player === i) ? 3.0 : 2.4"
-                            fill="#3b82f6"
-                            :stroke="(lastTick?.ball_owned_team === 0 && lastTick?.ball_owned_player === i) ? '#fde68a' : '#1e3a8a'"
-                            :stroke-width="(lastTick?.ball_owned_team === 0 && lastTick?.ball_owned_player === i) ? 0.7 : 0.4"/>
-                    <text :x="p[0]*100" :y="p[1]*100 + 1.0" text-anchor="middle"
-                          font-size="2.8" fill="white" font-weight="700"
-                          font-family="JetBrains Mono, ui-monospace" x-text="i"></text>
+                    <!-- Ball-holder golden glow ring -->
+                    <circle x-show="lastTick?.ball_owned_team === 0 && lastTick?.ball_owned_player === i"
+                            :cx="p[0]*100" :cy="p[1]*100" r="6"
+                            fill="rgba(253,230,138,0.18)" stroke="rgba(253,230,138,0.55)" stroke-width="0.7"/>
+                    <!-- Outer team ring -->
+                    <circle :cx="p[0]*100" :cy="p[1]*100" r="3.6"
+                            fill="rgba(59,130,246,0.28)" stroke="#60a5fa" stroke-width="0.7"/>
+                    <!-- Inner body -->
+                    <circle :cx="p[0]*100" :cy="p[1]*100" r="2.6" fill="#1d4ed8"/>
+                    <!-- Jersey number -->
+                    <text :x="p[0]*100" :y="p[1]*100 + 0.9"
+                          text-anchor="middle" font-size="2.6" fill="white" font-weight="800"
+                          font-family="JetBrains Mono,monospace" x-text="jerseyOf(i)"></text>
+                    <!-- Position label below -->
+                    <text :x="p[0]*100" :y="p[1]*100 + 6.8"
+                          text-anchor="middle" font-size="2" fill="#93c5fd" font-weight="600"
+                          font-family="Inter,sans-serif" x-text="posOf(i)"></text>
                   </g>
                 </template>
-                <!-- right team (红) -->
+
+                <!-- Red team players -->
                 <template x-for="(p, i) in (lastTick?.right_team ?? [])" :key="`R${i}`">
                   <g>
-                    <circle :cx="p[0]*100" :cy="p[1]*100"
-                            :r="(lastTick?.ball_owned_team === 1 && lastTick?.ball_owned_player === i) ? 3.0 : 2.4"
-                            fill="#ef4444"
-                            :stroke="(lastTick?.ball_owned_team === 1 && lastTick?.ball_owned_player === i) ? '#fde68a' : '#7f1d1d'"
-                            :stroke-width="(lastTick?.ball_owned_team === 1 && lastTick?.ball_owned_player === i) ? 0.7 : 0.4"/>
-                    <text :x="p[0]*100" :y="p[1]*100 + 1.0" text-anchor="middle"
-                          font-size="2.8" fill="white" font-weight="700"
-                          font-family="JetBrains Mono, ui-monospace" x-text="i"></text>
+                    <!-- Ball-holder golden glow ring -->
+                    <circle x-show="lastTick?.ball_owned_team === 1 && lastTick?.ball_owned_player === i"
+                            :cx="p[0]*100" :cy="p[1]*100" r="6"
+                            fill="rgba(253,230,138,0.18)" stroke="rgba(253,230,138,0.55)" stroke-width="0.7"/>
+                    <!-- Outer team ring -->
+                    <circle :cx="p[0]*100" :cy="p[1]*100" r="3.6"
+                            fill="rgba(239,68,68,0.28)" stroke="#f87171" stroke-width="0.7"/>
+                    <!-- Inner body -->
+                    <circle :cx="p[0]*100" :cy="p[1]*100" r="2.6" fill="#991b1b"/>
+                    <!-- Jersey number -->
+                    <text :x="p[0]*100" :y="p[1]*100 + 0.9"
+                          text-anchor="middle" font-size="2.6" fill="white" font-weight="800"
+                          font-family="JetBrains Mono,monospace" x-text="jerseyOf(5+i)"></text>
+                    <!-- Position label below -->
+                    <text :x="p[0]*100" :y="p[1]*100 + 6.8"
+                          text-anchor="middle" font-size="2" fill="#fca5a5" font-weight="600"
+                          font-family="Inter,sans-serif" x-text="posOf(5+i)"></text>
                   </g>
                 </template>
-                <!-- ball -->
-                <circle x-show="lastTick"
-                        :cx="(lastTick?.ball?.[0] ?? 0)*100"
-                        :cy="(lastTick?.ball?.[1] ?? 0)*100"
-                        r="1.4" fill="#fef3c7" stroke="#78350f" stroke-width="0.3"/>
+
+                <!-- Ball -->
+                <g x-show="lastTick" filter="url(#ball-glow)">
+                  <circle :cx="(lastTick?.ball?.[0] ?? 0)*100" :cy="(lastTick?.ball?.[1] ?? 0)*100"
+                          r="2" fill="#fef3c7" stroke="#92400e" stroke-width="0.45"/>
+                  <circle :cx="(lastTick?.ball?.[0] ?? 0)*100" :cy="(lastTick?.ball?.[1] ?? 0)*100"
+                          r="0.7" fill="rgba(120,53,15,0.5)"/>
+                </g>
               </svg>
-            </div>
-            <div class="mt-2 flex items-center gap-4 text-[11px] text-zinc-500">
-              <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-blue-500"></span>蓝队 (左向右进攻)</span>
-              <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-red-500"></span>红队 (右向左进攻)</span>
-              <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-amber-100"></span>球</span>
-              <span class="ml-auto mono text-zinc-600" x-show="lastTick">
-                ball <span x-text="`(${(lastTick?.ball?.[0] ?? 0).toFixed(2)}, ${(lastTick?.ball?.[1] ?? 0).toFixed(2)})`"></span>
-              </span>
-              <span x-show="!lastTick" class="text-zinc-600 italic">等待第一帧...</span>
+
+              <!-- Pitch footer legend -->
+              <div class="flex items-center gap-4 px-3 py-2 text-[11px] text-zinc-500 border-t"
+                   style="border-color:rgba(34,197,94,0.12);background:rgba(0,0,0,0.3)">
+                <span class="flex items-center gap-1.5">
+                  <span class="w-2.5 h-2.5 rounded-full bg-blue-500 ring-1 ring-blue-400/50"></span>
+                  <span class="text-blue-400">蓝队</span>
+                </span>
+                <span class="flex items-center gap-1.5">
+                  <span class="w-2.5 h-2.5 rounded-full bg-red-500 ring-1 ring-red-400/50"></span>
+                  <span class="text-red-400">红队</span>
+                </span>
+                <span class="flex items-center gap-1.5">
+                  <span class="w-2.5 h-2.5 rounded-full bg-amber-100 ring-1 ring-amber-400/50"></span>
+                  <span>球</span>
+                </span>
+                <span class="flex items-center gap-1.5 text-amber-400/70">
+                  <svg class="w-3 h-3" viewBox="0 0 12 12" fill="currentColor"><circle cx="6" cy="6" r="4" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+                  <span>持球</span>
+                </span>
+                <span class="ml-auto mono text-zinc-600 tabular-nums">
+                  ball <span x-text="`(${(lastTick?.ball?.[0] ?? 0).toFixed(2)}, ${(lastTick?.ball?.[1] ?? 0).toFixed(2)})`"></span>
+                </span>
+              </div>
             </div>
           </div>
 
@@ -414,7 +628,7 @@
                 <template x-for="(d, i) in liveFeed.slice(-50).reverse()" :key="`${d.episode}-${d.decision}-${i}`">
                   <div class="feed-row flex items-start gap-2 px-2 py-1.5 rounded text-xs bg-zinc-900/50 hover:bg-zinc-900">
                     <span class="mono text-zinc-600 shrink-0 w-12" x-text="`t${d.env_tick}`"></span>
-                    <span class="shrink-0" :class="(d.label || '').startsWith('蓝') ? 'text-blue-400' : 'text-red-400'" x-text="(d.label || '').slice(0, 8)"></span>
+                    <span class="shrink-0 font-medium" :class="labelColor(d.label)" x-text="labelShort(d.label)"></span>
                     <span class="text-zinc-300 mono" x-text="renderSkill(d.skill)"></span>
                     <span class="ml-auto text-zinc-600 mono shrink-0" x-text="`${d.llm_seconds}s`"></span>
                   </div>
@@ -445,7 +659,7 @@
                 <tbody>
                   <template x-for="row in perAgentRows" :key="row.slot">
                     <tr class="border-b border-zinc-900">
-                      <td class="py-2 pr-3" :class="row.label.startsWith('蓝') ? 'text-blue-400' : 'text-red-400'" x-text="row.label"></td>
+                      <td class="py-2 pr-3 font-medium" :class="labelColor(row.label)" x-text="row.label"></td>
                       <td class="py-2 pr-3 mono text-right text-zinc-300" x-text="row.decisions"></td>
                       <td class="py-2 pr-3 mono text-right text-zinc-300" x-text="`${row.llm_latency_p50.toFixed(2)}s`"></td>
                       <td class="py-2 pr-3 mono text-right text-zinc-400" x-text="`${row.llm_latency_p95.toFixed(2)}s`"></td>
@@ -470,7 +684,7 @@
   <div x-show="newRunModalOpen" x-transition.opacity
        class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4"
        @click.self="newRunModalOpen = false" style="display: none;">
-    <div class="card w-full max-w-md p-6" @click.stop>
+    <div class="card w-full max-w-3xl p-6 max-h-[90vh] overflow-y-auto scrollbar" @click.stop>
       <div class="flex items-center justify-between mb-5">
         <h3 class="text-lg font-semibold gradient-text">New eval run</h3>
         <button @click="newRunModalOpen = false" class="text-zinc-500 hover:text-zinc-200 text-xl leading-none">&times;</button>
@@ -535,6 +749,78 @@
         <div class="text-[11px] text-zinc-500 leading-relaxed pt-1">
           默认 = 1 局 90 分钟实时(5400s wall)。中途想停按右上"停止"按钮。
         </div>
+
+        <!-- ─────────────────────────────────────────────────────────────
+             球员灵魂注入面板 — 22 个 textarea，开始前可编辑每个球员的人设
+        ───────────────────────────────────────────────────────────── -->
+        <div class="border-t border-zinc-800 pt-4 mt-2">
+          <div class="flex items-center justify-between gap-2">
+            <button type="button" @click="lineupExpanded = !lineupExpanded"
+                    class="flex items-center gap-2 text-sm font-medium text-zinc-300 hover:text-zinc-100 transition">
+              <svg class="w-4 h-4 transition-transform" :class="lineupExpanded ? 'rotate-90' : ''"
+                   viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M9 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <span>球员灵魂注入</span>
+              <span class="text-[11px] text-zinc-500"
+                    x-text="lineupEntries.length ? `(${lineupEntries.length} 个球员)` : '(加载中…)'"></span>
+            </button>
+            <div class="flex gap-1.5" x-show="lineupExpanded && lineupEntries.length">
+              <button type="button" @click="applyFifaAll()"
+                      class="px-2.5 py-1 text-[11px] font-medium bg-amber-700/30 hover:bg-amber-700/50 text-amber-200 rounded transition">
+                应用 FIFA 全部
+              </button>
+              <button type="button" @click="resetAllLineup()"
+                      class="px-2.5 py-1 text-[11px] font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded transition">
+                重置全部
+              </button>
+              <button type="button" @click="loadLineupTemplate()"
+                      class="px-2.5 py-1 text-[11px] font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded transition"
+                      title="重新拉取模板（切换 scenario 后用）">
+                ↻ 刷新
+              </button>
+            </div>
+          </div>
+          <p class="text-[11px] text-zinc-500 leading-relaxed mt-1.5"
+             x-show="!lineupExpanded">
+            默认会用每个球员的中文人设（背景 + 球风）。展开可以为任意球员注入定制灵魂，或一键应用 FIFA 名将模板。
+          </p>
+
+          <div x-show="lineupExpanded" x-transition class="mt-3 space-y-1.5 max-h-[55vh] overflow-y-auto scrollbar pr-1">
+            <template x-for="entry in lineupEntries" :key="entry.slot">
+              <div class="bg-zinc-900/60 border border-zinc-800 rounded-lg p-2.5">
+                <div class="flex items-center gap-2 text-[11px]">
+                  <span class="w-1.5 h-1.5 rounded-full"
+                        :class="entry.team === 'blue' ? 'bg-blue-400' : 'bg-red-400'"></span>
+                  <span class="mono text-zinc-400">#<span x-text="entry.jersey"></span></span>
+                  <span class="font-medium text-zinc-200" x-text="entry.name"></span>
+                  <span class="text-zinc-600">·</span>
+                  <span class="text-zinc-400" x-text="entry.position"></span>
+                  <span class="text-zinc-600 mono ml-1" x-text="`slot ${entry.slot}`"></span>
+                  <span class="ml-auto flex items-center gap-2">
+                    <span class="text-zinc-500" x-show="entry.fifa_player">
+                      FIFA: <span class="text-amber-300/80 italic" x-text="entry.fifa_player"></span>
+                    </span>
+                    <button type="button" @click="entry.soul = entry.fifa"
+                            x-show="entry.fifa"
+                            class="text-[10px] px-1.5 py-0.5 bg-amber-700/30 hover:bg-amber-700/50 text-amber-200 rounded transition"
+                            title="只对这个球员应用 FIFA 模板">应用</button>
+                    <button type="button" @click="resetSlot(entry.slot)"
+                            class="text-[10px] px-1.5 py-0.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 rounded transition"
+                            title="只重置这个球员">重置</button>
+                  </span>
+                </div>
+                <textarea x-model="entry.soul" rows="3"
+                          class="w-full mt-2 bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-xs leading-relaxed focus:outline-none focus:border-indigo-500 resize-y"></textarea>
+              </div>
+            </template>
+            <div x-show="!lineupEntries.length && !lineupLoading"
+                 class="text-xs text-zinc-500 text-center py-4">
+              没加载到模板。检查 scenario 名称或 server 日志。
+            </div>
+          </div>
+        </div>
+
         <div class="flex justify-end gap-2 pt-2">
           <button type="button" @click="newRunModalOpen = false"
                   class="px-4 py-2 text-sm text-zinc-400 hover:text-zinc-200 transition">Cancel</button>
@@ -564,7 +850,7 @@
         creating: false,
         newRun: {
           n_episodes: 1,
-          scenario: 'llm_5v5_full',
+          scenario: 'llm_11v11_full',
           max_decisions_total: 100000,
           max_wall_seconds: 5400.0,
           obs_refresh_every_ticks: 25,
@@ -575,14 +861,18 @@
           stop_world_mode: false,
           stop_world_timeout: 8.0,
         },
+        // Per-slot soul textareas. Loaded by loadLineupTemplate() when modal opens.
+        // Each entry: {slot, team, name, jersey, position, default, fifa_player, fifa, soul}.
+        lineupEntries: [],
+        lineupExpanded: false,
+        lineupLoading: false,
         lastTick: null,
         stopping: false,
-        viewMode: '3d',  // '3d' = MJPEG video; '2d' = SVG top-down
+        viewMode: 'three',
+        threeCam: 'broadcast',
         videoError: false,
-        // Kickoff-wait banner state. Driven by the runner's
-        // ("waiting_for_kickoff", {ready, total, ...}) status events.
-        // Reset on selectRun(); cleared when "kickoff" arrives.
-        kickoffWait: null,  // {ready, total, timeout_seconds} | null
+        kickoffWait: null,
+        agentLabels: {},  // slot → full label string, populated from 'starting' status event
         get videoStreamUrl() {
           // Append a cache-bust so re-selecting a run reconnects the stream.
           return this.selectedRunId
@@ -594,6 +884,26 @@
         async boot() {
           await this.refreshRuns();
           this.pollHandle = setInterval(() => this.refreshRuns(), 4000);
+          this.$watch('viewMode', (val) => {
+            if (val === 'three') {
+              this.$nextTick(() => {
+                const c = document.getElementById('three-canvas');
+                if (c) { ThreeViewer.init(c); ThreeViewer.updateFromTick(this.lastTick); }
+              });
+            }
+          });
+          // $watch doesn't fire on initial value — kick off three init if it's the default mode.
+          this.$nextTick(() => {
+            if (this.viewMode === 'three') {
+              const c = document.getElementById('three-canvas');
+              if (c) ThreeViewer.init(c);
+            }
+          });
+        },
+
+        threeSetCamera(preset) {
+          this.threeCam = preset;
+          ThreeViewer.setCameraPreset(preset);
         },
 
         async refreshRuns() {
@@ -615,10 +925,12 @@
           this.stopping = false;
           this.videoError = false;
           this.kickoffWait = null;
+          this.agentLabels = {};
           // Default view: 3D when this run actually rendered; 2D otherwise.
           this.selectedEpisodeIdx = null;
           await this.loadRunDetail(runId);
-          this.viewMode = this.runDetail?.config?.render ? '3d' : '2d';
+          this.viewMode = 'three';
+          this.threeCam = 'broadcast';
           this.openWs(runId);
         },
 
@@ -731,13 +1043,17 @@
             if (this.liveFeed.length > 200) this.liveFeed = this.liveFeed.slice(-200);
             this.liveCount += 1;
           } else if (evt.type === 'tick') {
-            // Live position snapshot — drives the pitch view.
             this.lastTick = evt;
+            if (this.viewMode === 'three') ThreeViewer.updateFromTick(evt);
           } else if (evt.type === 'status') {
             // Runner phase events. Two phases drive the kickoff banner:
             //   "waiting_for_kickoff" → show "等待 N 个 LLM 准备开球..."
             //   "kickoff"             → hide banner; env starts ticking now
-            if (evt.phase === 'waiting_for_kickoff') {
+            if (evt.phase === 'starting' && evt.agents) {
+              const m = {};
+              evt.agents.forEach(a => { m[a.slot] = a.label; });
+              this.agentLabels = m;
+            } else if (evt.phase === 'waiting_for_kickoff') {
               this.kickoffWait = {
                 ready: evt.ready ?? 0,
                 total: evt.total ?? 0,
@@ -746,6 +1062,9 @@
             } else if (evt.phase === 'kickoff') {
               this.kickoffWait = null;
             }
+          } else if (evt.type === 'episode_start') {
+            this.lastTick = null;
+            this.kickoffWait = null;
           } else if (evt.type === 'run_end') {
             this.stopping = false;
             this.kickoffWait = null;
@@ -775,13 +1094,88 @@
           return `${name}(${args.join(', ')})`;
         },
 
+        jerseyOf(slot) {
+          const l = this.agentLabels[slot];
+          if (!l) return slot;
+          const m = l.match(/#(\d+)/);
+          return m ? m[1] : slot;
+        },
+        posOf(slot) {
+          const l = this.agentLabels[slot];
+          if (!l) return '';
+          const m = l.match(/\((\w+)\)/);
+          return m ? m[1] : '';
+        },
+        labelColor(label) {
+          if (!label) return 'text-zinc-400';
+          if (label.startsWith('蓝')) return 'text-blue-400';
+          if (label.startsWith('红')) return 'text-red-400';
+          return 'text-zinc-500';
+        },
+        labelShort(label) {
+          if (!label) return '?';
+          const jersey = label.match(/#(\d+)/)?.[1];
+          const pos = label.match(/\((\w+)\)/)?.[1];
+          if (jersey && pos) return `#${jersey} ${pos}`;
+          if (jersey) return `#${jersey}`;
+          return label.slice(0, 8);
+        },
+
+        async openNewRun() {
+          this.newRunModalOpen = true;
+          // Load (or refresh) the lineup template every time the modal opens
+          // so a scenario change is reflected.
+          await this.loadLineupTemplate();
+        },
+
+        async loadLineupTemplate() {
+          this.lineupLoading = true;
+          try {
+            const r = await fetch(`/api/lineup_template?scenario=${encodeURIComponent(this.newRun.scenario)}`);
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const data = await r.json();
+            // Initialize each slot's textarea with its default text.
+            this.lineupEntries = [...(data.blue || []), ...(data.red || [])].map(e => ({
+              ...e,
+              soul: e.default || '',
+            }));
+          } catch (e) {
+            console.error('lineup template load failed:', e);
+            this.lineupEntries = [];
+          } finally {
+            this.lineupLoading = false;
+          }
+        },
+
+        applyFifaAll() {
+          for (const e of this.lineupEntries) {
+            if (e.fifa) e.soul = e.fifa;
+          }
+        },
+
+        resetAllLineup() {
+          for (const e of this.lineupEntries) {
+            e.soul = e.default;
+          }
+        },
+
+        resetSlot(slot) {
+          const e = this.lineupEntries.find(x => x.slot === slot);
+          if (e) e.soul = e.default;
+        },
+
         async submitRun() {
           this.creating = true;
           try {
+            // Only POST overrides for slots that DIFFER from the default text.
+            const overrides = this.lineupEntries
+              .filter(e => (e.soul || '').trim() !== (e.default || '').trim())
+              .map(e => ({ slot: e.slot, soul: (e.soul || '').trim() }));
+            const payload = { ...this.newRun, lineup_overrides: overrides };
             const r = await fetch('/api/runs', {
               method: 'POST',
               headers: { 'content-type': 'application/json' },
-              body: JSON.stringify(this.newRun),
+              body: JSON.stringify(payload),
             });
             const data = await r.json();
             this.newRunModalOpen = false;
@@ -795,6 +1189,561 @@
         },
       };
     }
+  </script>
+
+  <!-- ══════════════════════════════════════════════════════════════════
+       Three.js free-camera 3D pitch viewer
+       Coordinate mapping:  gfootball x∈[-1,1] → Three x∈[-52.5,52.5]
+                            gfootball y∈[-0.42,0.42] → Three z∈[-34,34]
+                            gfootball ball.z → Three y (height)
+       ══════════════════════════════════════════════════════════════════ -->
+  <script>
+  const ThreeViewer = (() => {
+    const SX = 52.5, SZ = 34;   // scale factors (half-field metres)
+    let renderer, scene, camera, controls, raf;
+    let pBlue = [], pRed = [], ball, resizeObs;
+    let _followBall = false;
+
+    // ── helpers ──────────────────────────────────────────────────────
+    function gfToWorld(gfx, gfy) { return [gfx * SX, gfy * SZ]; }
+
+    function makePlayer(color) {
+      const g = new THREE.Group();
+      const body = new THREE.Mesh(
+        new THREE.CapsuleGeometry(0.35, 1.1, 4, 8),
+        new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05 })
+      );
+      body.position.y = 0.9; body.castShadow = true;
+      const head = new THREE.Mesh(
+        new THREE.SphereGeometry(0.28, 12, 12),
+        new THREE.MeshStandardMaterial({ color: 0xd9a87a, roughness: 0.75 })
+      );
+      head.position.y = 1.85; head.castShadow = true;
+      g.add(body, head);
+      return g;
+    }
+
+    // ── Posts (cylinders only — net is built separately by makeModernGoalNet) ──
+    function makePosts(x) {
+      const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.35, metalness: 0.1 });
+      const post = () => new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 2.44, 12), mat);
+      const lp = post(); lp.position.set(x, 1.22, -3.66); lp.castShadow = true; scene.add(lp);
+      const rp = post(); rp.position.set(x, 1.22,  3.66); rp.castShadow = true; scene.add(rp);
+      const cb = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 7.44, 12), mat);
+      cb.rotation.x = Math.PI / 2; cb.position.set(x, 2.44, 0); cb.castShadow = true; scene.add(cb);
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Procedural grass — Canvas-generated albedo + normal + roughness
+    // 1024² source, value-noise + fbm, mowing stripes, IBL-friendly PBR
+    // ─────────────────────────────────────────────────────────────────
+    function makeProceduralGrass() {
+      const SIZE = 1024, FIELD_X = 105, FIELD_Z = 68, STRIPES = 9;
+      const hash = (x, y, s) => { const n = Math.sin(x * 127.1 + y * 311.7 + s * 74.7) * 43758.5453; return n - Math.floor(n); };
+      const lerp = (a, b, t) => a + (b - a) * t;
+      const smooth = t => t * t * (3 - 2 * t);
+      const valueNoise = (x, y, s) => {
+        const xi = Math.floor(x), yi = Math.floor(y);
+        const xf = x - xi, yf = y - yi;
+        const u = smooth(xf), v = smooth(yf);
+        const a = hash(xi, yi, s), b = hash(xi + 1, yi, s);
+        const c = hash(xi, yi + 1, s), d = hash(xi + 1, yi + 1, s);
+        return lerp(lerp(a, b, u), lerp(c, d, u), v);
+      };
+      const fbm = (x, y, s) => {
+        let v = 0, amp = 0.5, freq = 1;
+        for (let i = 0; i < 3; i++) { v += amp * valueNoise(x * freq, y * freq, s + i * 13.3); amp *= 0.5; freq *= 2; }
+        return v;
+      };
+
+      const stripeA = { r: 60, g: 132, b: 56 };
+      const stripeB = { r: 38, g: 96, b: 42 };
+
+      // Albedo
+      const albedo = document.createElement('canvas');
+      albedo.width = albedo.height = SIZE;
+      const aCtx = albedo.getContext('2d');
+      const aImg = aCtx.createImageData(SIZE, SIZE);
+      for (let y = 0; y < SIZE; y++) {
+        const stripeIdx = Math.floor((y / SIZE) * STRIPES);
+        const baseStripe = (stripeIdx & 1) === 0 ? stripeA : stripeB;
+        const stripeF = (y / SIZE) * STRIPES - stripeIdx;
+        const edgeBlend = Math.min(stripeF, 1 - stripeF) * 2;
+        const edgeMix = Math.min(1, edgeBlend * 4);
+        for (let x = 0; x < SIZE; x++) {
+          const cross = 0.5 + 0.5 * Math.sin((x / SIZE) * Math.PI * 2 * (STRIPES * 1.7));
+          const crossMod = 1 + (cross - 0.5) * 0.06;
+          const nx = x / SIZE * 220, ny = y / SIZE * 220;
+          const blade = fbm(nx, ny, 1.0);
+          const fine  = valueNoise(nx * 3.7, ny * 3.7, 9.0);
+          const otherStripe = baseStripe === stripeA ? stripeB : stripeA;
+          const mixT = (1 - edgeMix) * 0.5;
+          let r = baseStripe.r * (1 - mixT) + otherStripe.r * mixT;
+          let g = baseStripe.g * (1 - mixT) + otherStripe.g * mixT;
+          let b = baseStripe.b * (1 - mixT) + otherStripe.b * mixT;
+          const lum = crossMod * (0.85 + blade * 0.30) * (0.93 + fine * 0.14);
+          r *= lum; g *= lum * 1.02; b *= lum * 0.95;
+          if (fine > 0.78 && blade > 0.55) {
+            const dry = (fine - 0.78) / 0.22;
+            r += dry * 35; g += dry * 22; b -= dry * 10;
+          }
+          const idx = (y * SIZE + x) * 4;
+          aImg.data[idx] = Math.max(0, Math.min(255, r));
+          aImg.data[idx + 1] = Math.max(0, Math.min(255, g));
+          aImg.data[idx + 2] = Math.max(0, Math.min(255, b));
+          aImg.data[idx + 3] = 255;
+        }
+      }
+      aCtx.putImageData(aImg, 0, 0);
+
+      // Normal (from height field)
+      const NRM = 512;
+      const heights = new Float32Array(NRM * NRM);
+      for (let y = 0; y < NRM; y++) for (let x = 0; x < NRM; x++) {
+        const nx = x / NRM * 220, ny = y / NRM * 220;
+        heights[y * NRM + x] = 0.7 * fbm(nx, ny, 1.0) + 0.3 * valueNoise(nx * 4, ny * 4, 9.0);
+      }
+      const normal = document.createElement('canvas');
+      normal.width = normal.height = NRM;
+      const nCtx = normal.getContext('2d');
+      const nImg = nCtx.createImageData(NRM, NRM);
+      const STR = 2.2;
+      for (let y = 0; y < NRM; y++) for (let x = 0; x < NRM; x++) {
+        const xl = (x - 1 + NRM) % NRM, xr = (x + 1) % NRM;
+        const yu = (y - 1 + NRM) % NRM, yd = (y + 1) % NRM;
+        const dx = (heights[y * NRM + xr] - heights[y * NRM + xl]) * STR;
+        const dy = (heights[yd * NRM + x] - heights[yu * NRM + x]) * STR;
+        const len = Math.sqrt(dx * dx + dy * dy + 1);
+        const idx = (y * NRM + x) * 4;
+        nImg.data[idx]     = ((-dx / len) * 0.5 + 0.5) * 255;
+        nImg.data[idx + 1] = ((-dy / len) * 0.5 + 0.5) * 255;
+        nImg.data[idx + 2] = ((1 / len) * 0.5 + 0.5) * 255;
+        nImg.data[idx + 3] = 255;
+      }
+      nCtx.putImageData(nImg, 0, 0);
+
+      // Roughness (subtle variation)
+      const ROU = 256;
+      const rough = document.createElement('canvas');
+      rough.width = rough.height = ROU;
+      const rCtx = rough.getContext('2d');
+      const rImg = rCtx.createImageData(ROU, ROU);
+      for (let y = 0; y < ROU; y++) for (let x = 0; x < ROU; x++) {
+        const v = fbm(x / ROU * 220, y / ROU * 220, 5.0);
+        const stripeIdx = Math.floor((y / ROU) * STRIPES);
+        const stripeBias = (stripeIdx & 1) === 0 ? -0.05 : 0.05;
+        const rv = Math.max(0.55, Math.min(0.95, 0.78 + (v - 0.5) * 0.25 + stripeBias)) * 255;
+        const idx = (y * ROU + x) * 4;
+        rImg.data[idx] = rImg.data[idx + 1] = rImg.data[idx + 2] = rv;
+        rImg.data[idx + 3] = 255;
+      }
+      rCtx.putImageData(rImg, 0, 0);
+
+      const aTex = new THREE.CanvasTexture(albedo);
+      const nTex = new THREE.CanvasTexture(normal);
+      const rTex = new THREE.CanvasTexture(rough);
+      const REPEAT_X = 6, REPEAT_Z = REPEAT_X * (FIELD_Z / FIELD_X);
+      for (const t of [aTex, nTex, rTex]) {
+        t.wrapS = t.wrapT = THREE.RepeatWrapping;
+        t.repeat.set(REPEAT_X, REPEAT_Z);
+        t.anisotropy = 8;
+      }
+      aTex.encoding = THREE.sRGBEncoding;     // r148 API (colour)
+      nTex.encoding = THREE.LinearEncoding;
+      rTex.encoding = THREE.LinearEncoding;
+
+      const geom = new THREE.PlaneGeometry(FIELD_X, FIELD_Z, 1, 1);
+      geom.rotateX(-Math.PI / 2);
+      const mat = new THREE.MeshStandardMaterial({
+        map: aTex,
+        normalMap: nTex,
+        normalScale: new THREE.Vector2(0.6, 0.6),
+        roughnessMap: rTex,
+        roughness: 1.0,
+        metalness: 0.0,
+      });
+      const mesh = new THREE.Mesh(geom, mat);
+      mesh.receiveShadow = true;
+      return mesh;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Sky shader sphere — cinematic dusk gradient + IBL via PMREM
+    // ─────────────────────────────────────────────────────────────────
+    function setupSkyAndEnvironment() {
+      const skyGeom = new THREE.SphereGeometry(1, 48, 24);
+      const skyMat = new THREE.ShaderMaterial({
+        side: THREE.BackSide,
+        depthWrite: false,
+        uniforms: {
+          uZenith:  { value: new THREE.Color(0x1a1d3a) },
+          uMid:     { value: new THREE.Color(0x6b3a6e) },
+          uHorizon: { value: new THREE.Color(0xff8a3d) },
+          uBand:    { value: new THREE.Color(0xc8b25a) },
+          uGround:  { value: new THREE.Color(0x0e0a08) },
+        },
+        vertexShader: `
+          varying vec3 vDir;
+          void main() { vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+        fragmentShader: `
+          varying vec3 vDir;
+          uniform vec3 uZenith, uMid, uHorizon, uBand, uGround;
+          void main() {
+            float h = vDir.y;
+            float tBand = smoothstep(0.02, 0.12, h) * (1.0 - smoothstep(0.05, 0.2, h));
+            float tMid  = smoothstep(0.1,  0.45, h);
+            float tZen  = smoothstep(0.4,  0.95, h);
+            vec3 col = uHorizon;
+            col = mix(col, uMid,    tMid);
+            col = mix(col, uZenith, tZen);
+            col += uBand * tBand * 0.5;
+            if (h < 0.0) {
+              float k = smoothstep(0.0, -0.25, h);
+              col = mix(uHorizon * 0.6, uGround, k);
+            }
+            gl_FragColor = vec4(col, 1.0);
+          }`,
+      });
+      const skyMesh = new THREE.Mesh(skyGeom, skyMat);
+      skyMesh.scale.setScalar(450);
+      skyMesh.frustumCulled = false;
+      skyMesh.renderOrder = -1;       // draw before everything else
+      scene.add(skyMesh);
+
+      // Bake to PMREM for IBL — feed an isolated scene so we don't capture pitch/lights.
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      pmrem.compileEquirectangularShader();
+      const envScene = new THREE.Scene();
+      const envSky = skyMesh.clone();
+      envSky.material = skyMat;       // share material (uniforms)
+      envScene.add(envSky);
+      const envRT = pmrem.fromScene(envScene, 0.04);
+      scene.environment = envRT.texture;
+      pmrem.dispose();
+
+      scene.fog = null;               // fog fights the warm horizon
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Lighting — hemisphere + low warm sun (dusk), tight shadow camera
+    // ─────────────────────────────────────────────────────────────────
+    function setupLighting() {
+      const hemi = new THREE.HemisphereLight(0x6a5a8a, 0x2a3a22, 0.55);
+      hemi.position.set(0, 1, 0); scene.add(hemi);
+
+      const sun = new THREE.DirectionalLight(0xffe2b8, 2.4);
+      sun.position.set(60, 80, 35);
+      sun.target.position.set(0, 0, 0); scene.add(sun.target);
+      sun.castShadow = true;
+      sun.shadow.mapSize.set(2048, 2048);
+      const halfX = 105 / 2 + 4, halfZ = 68 / 2 + 4;
+      sun.shadow.camera.left = -halfX; sun.shadow.camera.right = halfX;
+      sun.shadow.camera.top  =  halfZ; sun.shadow.camera.bottom = -halfZ;
+      sun.shadow.camera.near = 1;      sun.shadow.camera.far    = 250;
+      sun.shadow.bias       = -0.0002;
+      sun.shadow.normalBias = 0.05;
+      sun.shadow.radius     = 2;
+      scene.add(sun);
+      return sun;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Modern goal net — alpha-tested diamond-weave on curved panels
+    // ─────────────────────────────────────────────────────────────────
+    let _NET_TEX = null;
+    function getNetTexture() {
+      if (_NET_TEX) return _NET_TEX;
+      const SIZE = 512;
+      const c = document.createElement('canvas');
+      c.width = c.height = SIZE;
+      const ctx = c.getContext('2d');
+      ctx.clearRect(0, 0, SIZE, SIZE);
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = 'rgba(245,245,245,0.85)';
+      ctx.lineWidth = 1.6;
+      const STEP = 16, DIAG = SIZE * 1.5;
+      for (let i = -DIAG; i < DIAG; i += STEP) { ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i + DIAG, DIAG); ctx.stroke(); }
+      for (let i = -DIAG; i < DIAG; i += STEP) { ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i - DIAG, DIAG); ctx.stroke(); }
+      ctx.fillStyle = 'rgba(255,255,255,0.95)';
+      for (let yy = 0; yy <= SIZE; yy += STEP) {
+        for (let xx = (yy / STEP) % 2 === 0 ? 0 : STEP / 2; xx <= SIZE; xx += STEP) {
+          ctx.beginPath(); ctx.arc(xx, yy, 1.1, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+      const tex = new THREE.CanvasTexture(c);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.anisotropy = 8;
+      tex.encoding = THREE.sRGBEncoding;
+      _NET_TEX = tex;
+      return tex;
+    }
+
+    function makeModernGoalNet(x) {
+      const group = new THREE.Group();
+      const NET_TEX = getNetTexture();
+      const netMat = new THREE.MeshStandardMaterial({
+        map: NET_TEX, alphaMap: NET_TEX, transparent: true, alphaTest: 0.35,
+        side: THREE.DoubleSide, color: 0xffffff, roughness: 0.95, metalness: 0,
+        depthWrite: false,
+      });
+      const W = 7.32, H = 2.44, D_TOP = 1.6, D_BOT = 2.2;
+      const dirSign = Math.sign(x);
+      const xLine = x;
+      const xBackTop = xLine + dirSign * D_TOP;
+      const xBackBot = xLine + dirSign * D_BOT;
+
+      function makePanel(a, b, c, d, repeatU, repeatV, sagAxis, sagAmount) {
+        const SEG = 16;
+        const geom = new THREE.PlaneGeometry(1, 1, SEG, SEG);
+        const pos = geom.attributes.position;
+        const uv  = geom.attributes.uv;
+        for (let i = 0; i < pos.count; i++) {
+          const u = pos.getX(i) + 0.5;
+          const v = pos.getY(i) + 0.5;
+          const topX = a.x + (b.x - a.x) * u, topY = a.y + (b.y - a.y) * u, topZ = a.z + (b.z - a.z) * u;
+          const botX = d.x + (c.x - d.x) * u, botY = d.y + (c.y - d.y) * u, botZ = d.z + (c.z - d.z) * u;
+          let X = botX + (topX - botX) * v;
+          let Y = botY + (topY - botY) * v;
+          let Z = botZ + (topZ - botZ) * v;
+          const bow = 4 * u * (1 - u) * v * (1 - v);
+          if (sagAxis === 'y') Y -= sagAmount * bow;
+          else if (sagAxis === 'x') X += -dirSign * sagAmount * bow;
+          else if (sagAxis === 'z') Z += sagAmount * bow;
+          pos.setXYZ(i, X, Y, Z);
+          uv.setXY(i, u * repeatU, v * repeatV);
+        }
+        pos.needsUpdate = true; uv.needsUpdate = true;
+        geom.computeVertexNormals();
+        const m = new THREE.Mesh(geom, netMat);
+        m.receiveShadow = true;
+        return m;
+      }
+
+      const zR = +W / 2, zL = -W / 2;
+      const backTL = new THREE.Vector3(xBackTop, H, zL);
+      const backTR = new THREE.Vector3(xBackTop, H, zR);
+      const backBR = new THREE.Vector3(xBackBot, 0, zR);
+      const backBL = new THREE.Vector3(xBackBot, 0, zL);
+      group.add(makePanel(backTL, backTR, backBR, backBL, 14, 5, 'x', 0.18));
+
+      const roofFL = new THREE.Vector3(xLine, H, zL);
+      const roofFR = new THREE.Vector3(xLine, H, zR);
+      const roofBR = new THREE.Vector3(xBackTop, H, zR);
+      const roofBL = new THREE.Vector3(xBackTop, H, zL);
+      group.add(makePanel(roofFL, roofFR, roofBR, roofBL, 14, 3, 'y', 0.12));
+
+      const sLFT = new THREE.Vector3(xLine, H, zL);
+      const sLBT = new THREE.Vector3(xBackTop, H, zL);
+      const sLBB = new THREE.Vector3(xBackBot, 0, zL);
+      const sLFB = new THREE.Vector3(xLine, 0, zL);
+      group.add(makePanel(sLFT, sLBT, sLBB, sLFB, 4, 5, 'z', 0.08));
+
+      const sRFT = new THREE.Vector3(xLine, H, zR);
+      const sRBT = new THREE.Vector3(xBackTop, H, zR);
+      const sRBB = new THREE.Vector3(xBackBot, 0, zR);
+      const sRFB = new THREE.Vector3(xLine, 0, zR);
+      group.add(makePanel(sRFT, sRBT, sRBB, sRFB, 4, 5, 'z', -0.08));
+
+      return group;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Modern ball — Telstar-style 12 black pentagons via equirectangular Canvas
+    // ─────────────────────────────────────────────────────────────────
+    function makeModernBall() {
+      const SIZE = 512;
+      const canvas = document.createElement('canvas');
+      canvas.width = SIZE * 2; canvas.height = SIZE;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#f4f2ed';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.strokeStyle = 'rgba(180,180,170,0.18)';
+      ctx.lineWidth = 1;
+      for (let i = 0; i < 60; i++) {
+        ctx.beginPath();
+        const y = Math.random() * canvas.height;
+        ctx.moveTo(0, y);
+        ctx.bezierCurveTo(canvas.width * 0.33, y + (Math.random() - 0.5) * 30,
+                          canvas.width * 0.66, y + (Math.random() - 0.5) * 30,
+                          canvas.width, y + (Math.random() - 0.5) * 30);
+        ctx.stroke();
+      }
+      const t = (1 + Math.sqrt(5)) / 2;
+      const verts = [
+        [-1, t, 0],[1, t, 0],[-1, -t, 0],[1, -t, 0],
+        [0, -1, t],[0, 1, t],[0, -1, -t],[0, 1, -t],
+        [t, 0, -1],[t, 0, 1],[-t, 0, -1],[-t, 0, 1],
+      ].map(v => { const L = Math.hypot(v[0], v[1], v[2]); return [v[0]/L, v[1]/L, v[2]/L]; });
+
+      const dirToUV = d => {
+        const lon = Math.atan2(d[2], d[0]), lat = Math.asin(d[1]);
+        const u = (lon + Math.PI) / (2 * Math.PI);
+        const v = 1 - (lat + Math.PI / 2) / Math.PI;
+        return [u * canvas.width, v * canvas.height];
+      };
+      const drawPent = (cx, cy, r, rot) => {
+        ctx.beginPath();
+        for (let k = 0; k < 5; k++) {
+          const ang = rot + (k / 5) * Math.PI * 2 - Math.PI / 2;
+          const px = cx + Math.cos(ang) * r;
+          const py = cy + Math.sin(ang) * r;
+          if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.fillStyle = '#0e0e0e'; ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 2; ctx.stroke();
+      };
+      const BASE_R = SIZE * 0.085;
+      for (const v of verts) {
+        const [px, py] = dirToUV(v);
+        const lat = Math.asin(v[1]);
+        const stretch = 1 / Math.max(0.35, Math.cos(lat));
+        const rot = (v[0] + v[1] + v[2]) * 1.7;
+        for (const dx of [0, canvas.width, -canvas.width]) {
+          ctx.save();
+          ctx.translate(px + dx, py);
+          ctx.scale(stretch, 1);
+          drawPent(0, 0, BASE_R, rot);
+          ctx.restore();
+        }
+      }
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.encoding = THREE.sRGBEncoding;
+      tex.anisotropy = 8;
+
+      const RAD = 0.22;
+      const geom = new THREE.SphereGeometry(RAD, 48, 32);
+      const mat = new THREE.MeshStandardMaterial({
+        map: tex,
+        roughness: 0.55,
+        metalness: 0.05,
+        envMapIntensity: 0.9,
+      });
+      const mesh = new THREE.Mesh(geom, mat);
+      mesh.castShadow = true; mesh.receiveShadow = true;
+      return mesh;
+    }
+
+    function buildLines() {
+      const pts = [];
+      const L = (x1,z1,x2,z2) => { pts.push(new THREE.Vector3(x1,0.02,z1), new THREE.Vector3(x2,0.02,z2)); };
+      L(-52.5,-34, 52.5,-34); L(52.5,-34, 52.5,34); L(52.5,34,-52.5,34); L(-52.5,34,-52.5,-34);
+      L(0,-34,0,34);
+      // penalty boxes
+      L(-52.5,-20.15,-36.5,-20.15); L(-36.5,-20.15,-36.5,20.15); L(-36.5,20.15,-52.5,20.15);
+      L( 52.5,-20.15, 36.5,-20.15); L( 36.5,-20.15, 36.5,20.15); L( 36.5,20.15, 52.5,20.15);
+      // goal areas
+      L(-52.5,-9.16,-46.5,-9.16); L(-46.5,-9.16,-46.5,9.16); L(-46.5,9.16,-52.5,9.16);
+      L( 52.5,-9.16, 46.5,-9.16); L( 46.5,-9.16, 46.5,9.16); L( 46.5,9.16, 52.5,9.16);
+      const mat = new THREE.LineBasicMaterial({ color:0xffffff, opacity:0.75, transparent:true });
+      scene.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts), mat));
+      // centre circle
+      const cpts = [];
+      for (let i=0; i<=64; i++) { const a=i/64*Math.PI*2; cpts.push(new THREE.Vector3(Math.cos(a)*9.15,0.02,Math.sin(a)*9.15)); }
+      scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(cpts), mat));
+      // corner arcs
+      const corners = [[-52.5,-34,1,1],[52.5,-34,-1,1],[52.5,34,-1,-1],[-52.5,34,1,-1]];
+      corners.forEach(([cx,cz,sx,sz]) => {
+        const apts = [];
+        for (let i=0; i<=12; i++) { const a=i/12*Math.PI/2; apts.push(new THREE.Vector3(cx+sx*Math.cos(a)*2, 0.02, cz+sz*Math.sin(a)*2)); }
+        scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(apts), mat));
+      });
+    }
+
+    // ── public API ───────────────────────────────────────────────────
+    function init(canvas) {
+      if (renderer) { resize(); return; }
+
+      renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.outputEncoding = THREE.sRGBEncoding;          // r148 sRGB output
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.05;
+
+      scene = new THREE.Scene();
+      // background is the sky-shader sphere added in setupSkyAndEnvironment.
+      // The horizon colour at the very base of the gradient peeks through if anything misses.
+
+      camera = new THREE.PerspectiveCamera(55, 16/9, 0.5, 1000);
+
+      controls = new THREE.OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true; controls.dampingFactor = 0.07;
+      controls.minDistance = 8; controls.maxDistance = 200;
+      controls.maxPolarAngle = Math.PI / 2 - 0.02;
+
+      // Sky + IBL FIRST — environment map needs to exist before materials sample it.
+      setupSkyAndEnvironment();
+      // Sun + hemisphere (replaces the 4 corner spotlights).
+      setupLighting();
+
+      // Pitch grass — procedural canvas-textured PBR plane.
+      scene.add(makeProceduralGrass());
+
+      // White lines + posts.
+      buildLines();
+      makePosts(-52.5); makePosts(52.5);
+      // Modern goal nets (woven panels, sagged inward).
+      scene.add(makeModernGoalNet(-52.5));
+      scene.add(makeModernGoalNet(52.5));
+
+      // Players.
+      for (let i = 0; i < 5; i++) {
+        const b = makePlayer(0x2563eb); pBlue.push(b); scene.add(b);
+        const r = makePlayer(0xdc2626); pRed.push(r);  scene.add(r);
+      }
+
+      // Modern ball (Telstar-style pattern).
+      ball = makeModernBall();
+      scene.add(ball);
+
+      setCameraPreset('broadcast');
+
+      resizeObs = new ResizeObserver(resize);
+      resizeObs.observe(canvas.parentElement);
+      resize();
+
+      (function loop() { raf = requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); })();
+    }
+
+    function updateFromTick(tick) {
+      if (!renderer || !tick) return;
+      if (tick.ball) {
+        const [wx,wz] = gfToWorld(tick.ball[0], tick.ball[1]);
+        const wy = tick.ball.length > 2 ? Math.max(0.22, tick.ball[2]*10+0.22) : 0.22;
+        ball.position.set(wx, wy, wz);
+      }
+      (tick.left_team  || []).forEach((p,i) => { if (pBlue[i]) { const [wx,wz]=gfToWorld(p[0],p[1]); pBlue[i].position.set(wx,0,wz); } });
+      (tick.right_team || []).forEach((p,i) => { if (pRed[i])  { const [wx,wz]=gfToWorld(p[0],p[1]); pRed[i].position.set(wx,0,wz);  } });
+      if (_followBall && ball && controls) {
+        controls.target.set(ball.position.x, 0, ball.position.z);
+        camera.position.set(ball.position.x, 22, ball.position.z + 20);
+      }
+    }
+
+    function setCameraPreset(preset) {
+      if (!camera) return;
+      _followBall = false;
+      if (controls) controls.target.set(0, 0, 0);
+      if      (preset === 'broadcast') { camera.position.set(0, 38, 50); }
+      else if (preset === 'top')       { camera.position.set(0, 90, 0.1); }
+      else if (preset === 'side')      { camera.position.set(0, 28, 60); }
+      else if (preset === 'follow')    { _followBall = true; }
+      if (controls) controls.update();
+    }
+
+    function resize() {
+      if (!renderer || !camera) return;
+      const el = renderer.domElement.parentElement;
+      if (!el) return;
+      const w = el.clientWidth, h = el.clientHeight || Math.round(w*9/16);
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h; camera.updateProjectionMatrix();
+    }
+
+    return { init, updateFromTick, setCameraPreset };
+  })();
   </script>
 </body>
 </html>

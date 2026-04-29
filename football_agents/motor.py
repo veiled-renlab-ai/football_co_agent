@@ -127,8 +127,10 @@ class MotorController:
       auto-following gfootball's `active` switch), `player_id=None` falls
       back to obs["active"]. New multi-agent code MUST pass an explicit id.
     """
-    # Default tolerance for "arrived at point" checks (in gfootball units).
-    EPSILON: float = 0.03
+    # Tightened "arrived at point" tolerance (in gfootball units, x∈[-1,1]).
+    # 0.015 ≈ 0.8 m on a real pitch — precise enough to avoid "arrived but
+    # actually 2 m off" while not overshooting.  Previously 0.03.
+    EPSILON: float = 0.015
 
     def __init__(
         self,
@@ -163,7 +165,12 @@ class MotorController:
         )
 
     def _opponent_goal_x(self) -> float:
-        return 1.0
+        """Opponent goal x-coordinate based on which side this player is on.
+
+        team_side='left'  → our team plays left-to-right → opponent goal at x=+1.
+        team_side='right' → our team plays right-to-left → opponent goal at x=-1.
+        """
+        return 1.0 if self.team_side == "left" else -1.0
 
     # --- override me ------------------------------------------------------
 
@@ -251,11 +258,42 @@ class DribbleTowardController(MotorController):
         super().__init__(skill, team_side, player_id)
         self._arrived: bool = False
 
+    # Radius within which an opponent counts as "crowding" (gfootball units).
+    # 0.10 ≈ 5.5 m on a real pitch — tight enough to detect a press/double-team.
+    _CROWD_RADIUS: float = 0.10
+    # Number of nearby opponents that triggers an abort (2 = double-team).
+    _CROWD_THRESHOLD: int = 2
+
+    def _is_crowded(self, obs: dict) -> bool:
+        """Return True if ≥ _CROWD_THRESHOLD opponents are within _CROWD_RADIUS."""
+        opp_key = "right_team"
+        try:
+            pos, _ = self._self_pos_vel(obs)
+            self_x, self_y = float(pos[0]), float(pos[1])
+            count = 0
+            for opp_pos in obs[opp_key]:
+                dist = math.hypot(
+                    float(opp_pos[0]) - self_x,
+                    float(opp_pos[1]) - self_y,
+                )
+                if dist < self._CROWD_RADIUS:
+                    count += 1
+                    if count >= self._CROWD_THRESHOLD:
+                        return True
+        except Exception:
+            pass
+        return False
+
     def step(self, obs: dict) -> tuple[int, SkillStatus]:
         self.tick_count += 1
         skill: DribbleToward = self.skill  # type: ignore[assignment]
         if not self._has_ball(obs):
             return A.RELEASE_DRIBBLE, "failed"
+
+        # Abort dribble if double-teamed — let fallback pick a safer skill
+        if self._is_crowded(obs):
+            return A.RELEASE_DRIBBLE, "completed"
+
         pos, _ = self._self_pos_vel(obs)
         tgt_x, tgt_y = skill.target_x, skill.target_y
         dx = tgt_x - float(pos[0])

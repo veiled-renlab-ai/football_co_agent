@@ -260,6 +260,7 @@ class MultiAgentRunner:
                     recent_llm_intent=agent.get_recent_llm_intent(
                         current_tick=self.env.tick, window_ticks=100,
                     ),
+                    motor_status=agent.last_skill_status,
                 )
                 fallback_fn = get_fallback(agent.persona)
                 fb_skill = fallback_fn(ctx)
@@ -286,6 +287,12 @@ class MultiAgentRunner:
         recent_llm_intent never expires → fallback would keep re-installing the
         last LLM skill forever. Passing None forces the position-based fallback
         to run instead.
+
+        motor_status is passed so the guard can detect if the current skill is
+        still running (in_progress) and avoid interrupting it. In Phase 3, this
+        method is only called when step_motor() returned status != "in_progress",
+        so motor_status will be "completed" or "failed" — the guard will allow
+        the fallback to proceed.
         """
         try:
             raw = self.env.raw_obs_for_slot(agent.slot)
@@ -296,7 +303,8 @@ class MultiAgentRunner:
                 ctx = FallbackContext(
                     persona=agent.persona,
                     obs=fb_obs,
-                    recent_llm_intent=None,  # bypass 100-tick guard in stop-world
+                    recent_llm_intent=None,  # bypass 100-tick intent lock in stop-world
+                    motor_status=agent.last_skill_status,
                 )
                 fallback_fn = get_fallback(agent.persona)
                 fb_skill = fallback_fn(ctx)

@@ -32,14 +32,23 @@ _STAMINA_DOWNSHIFT_THRESHOLD = 0.30
 def apply_shared_short_circuits(ctx: FallbackContext) -> Optional[Skill]:
     """Return a Skill that overrides everything, or None to pass through.
 
-    Three universal overrides (in evaluation order):
+    Four universal overrides (in evaluation order):
       1. game_mode != Normal — set piece in progress, just stand still so
          we don't wander during kickoff/free-kick/corner etc.
-      2. Ball completely out of FOV AND no recent LLM intent — HoldPosition
+      2. Motor still in_progress — the current skill hasn't finished yet;
+         let it run to completion rather than interrupting it. Return None
+         to signal "no override, keep the existing controller". This is the
+         correct behaviour in stop-world mode where fallback is re-armed on
+         every env tick during the K-tick execution window.
+      3. Ball completely out of FOV AND no recent LLM intent — HoldPosition
          at the player's anchor feels more "lost but alert" than sprinting
          toward a phantom ball the runner might not be able to find.
-      3. LLM chose something <100 ticks ago — defer to that intent rather
-         than the runner yanking the body in a different direction.
+      4. LLM chose something recently — only defer to that intent if the
+         motor has already finished (motor_status != "in_progress") AND the
+         intent was issued very recently (within 5 ticks). In stop-world
+         mode recent_llm_intent is always None (passed explicitly by
+         _arm_fallback_for_stop_world), so this guard is bypassed entirely
+         in that path.
     """
     obs = ctx.obs
 
@@ -47,14 +56,24 @@ def apply_shared_short_circuits(ctx: FallbackContext) -> Optional[Skill]:
     if obs.game_mode != _NORMAL_PLAY:
         return HoldPosition()
 
-    # 2. Ball fully invisible AND no fresh LLM intent → hold
+    # 2. Motor still executing → don't interrupt it; let it finish.
+    #    Return None so the caller's personal fallback logic is skipped too
+    #    (the whole fallback call is a no-op when the motor is mid-skill).
+    if ctx.motor_status == "in_progress":
+        return None
+
+    # 3. Ball fully invisible AND no fresh LLM intent → hold
     if obs.ball() is None and ctx.recent_llm_intent is None:
         return HoldPosition()
 
-    # 3. Respect a fresh LLM decision over any fallback logic
+    # 4. Respect a fresh LLM decision — but only for a very short window
+    #    (5 ticks ≈ 0.1s at 50 fps) to avoid the 2-second "intent lockout"
+    #    that plagued the async runner.  In stop-world mode recent_llm_intent
+    #    is always None, so this branch is never reached from that path.
     if ctx.recent_llm_intent is not None:
-        skill, _tick = ctx.recent_llm_intent
-        return skill
+        skill, issued_tick = ctx.recent_llm_intent
+        if (obs.tick - issued_tick) < 5:
+            return skill
 
     return None
 

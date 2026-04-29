@@ -144,6 +144,62 @@ class LLMClient:
             f"expected aliyun_token_plan|volcengine|minimax"
         )
 
+
+def build_channel_pool() -> list["LLMClient"]:
+    """Build N independent (key, model) channels for 11v11 multi-agent load balancing.
+
+    Each channel is a separate LLMClient instance with one key + one model. Per-agent
+    binding (slot % len(pool)) gives each player a fixed channel — so 22 LLM workers
+    are spread across 4 (key, model) buckets, each carrying ~5-6 concurrent calls,
+    well under the ~10/key rate limit.
+
+    Default 4-channel pool (火山方舟 only — fastest endpoint per benchmark):
+        C0: ARK_KEY_1 + deepseek-v3.2     (~1.5s latency)
+        C1: ARK_KEY_2 + deepseek-v3.2     (~1.7s)
+        C2: ARK_KEY_1 + minimax-m2.7      (~2.4s)
+        C3: ARK_KEY_2 + minimax-m2.7      (~2.1s)
+
+    Override via env vars:
+        ARK_KEYS         comma-separated keys, e.g. "key1,key2"
+        ARK_BASE_URL     defaults to volcengine coding endpoint
+        LLM_CHANNEL_POOL JSON list, e.g. '[{"key":"k1","model":"deepseek-v3.2"}, ...]'
+
+    If only one ARK_KEYS entry is provided OR none is set, falls back to a 1-channel
+    pool from LLMClient.from_env() (backward-compatible single-provider mode).
+    """
+    base_url = os.getenv(
+        "ARK_BASE_URL",
+        "https://ark.cn-beijing.volces.com/api/coding/v3",
+    )
+
+    raw = os.getenv("LLM_CHANNEL_POOL", "").strip()
+    if raw:
+        cfg = json.loads(raw)
+    else:
+        keys = _parse_key_list(os.getenv("ARK_KEYS", ""))
+        if len(keys) < 2:
+            logger.info("ARK_KEYS not set or has <2 keys; falling back to single-channel from_env()")
+            return [LLMClient.from_env()]
+        # Default: 2 keys × 2 fast models = 4 independent rate-limit buckets
+        cfg = [
+            {"key": keys[0], "model": "deepseek-v3.2"},
+            {"key": keys[1], "model": "deepseek-v3.2"},
+            {"key": keys[0], "model": "minimax-m2.7"},
+            {"key": keys[1], "model": "minimax-m2.7"},
+        ]
+
+    pool: list[LLMClient] = []
+    for i, ch in enumerate(cfg):
+        key = ch["key"]
+        model = ch["model"]
+        # Doubao models need extra_body to disable extended thinking; deepseek/minimax don't.
+        extra = {"thinking": {"type": "disabled"}} if model.startswith("doubao") else None
+        pool.append(LLMClient(
+            api_keys=[key], base_url=base_url, model=model, extra_body=extra,
+        ))
+        logger.info("channel %d: model=%s key=...%s", i, model, key[-4:])
+    return pool
+
     # ---- main call ------------------------------------------------------
 
     def choose_tool(

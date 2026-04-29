@@ -9,22 +9,24 @@ process — gfootball env is not thread-safe across episodes).
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dataclass_replace
 from typing import Callable, Optional
 
 from ..env import FootballEnvAdapter
-from ..llm_client import LLMClient
+from ..llm_client import LLMClient, build_channel_pool
 from ..message_bus import TeamMessageBus
 from ..multi_agent_runner import MultiAgentRunner
 from ..perception import EgocentricFilter
-from ..personas import TEAM_BLUE_5V5, TEAM_RED_5V5
+from ..players import (
+    TEAM_BLUE_5V5, TEAM_BLUE_11V11, TEAM_RED_5V5, TEAM_RED_11V11,
+)
 from ..player_agent import PlayerAgent
 from .metrics import serialize_decision_log, summarize_episode
 
 
 @dataclass
 class EpisodeConfig:
-    scenario: str = "llm_5v5_full"
+    scenario: str = "llm_11v11_full"
     # Decisions cap is effectively unlimited — wall-clock and gfootball's
     # built-in done flag (or user pressing Stop) end the match.
     max_decisions_total: int = 100_000
@@ -54,6 +56,11 @@ class EpisodeConfig:
     stop_world_mode: bool = False
     # Per-agent timeout (seconds) before arming fallback and unblocking.
     stop_world_timeout: float = 8.0
+    # User-injected per-slot soul overrides. Each entry: {"slot": int, "soul": str}.
+    # When a slot is in this list, its persona's custom_soul field is set to the
+    # user's text and that text replaces the default play_style+background block
+    # in the system prompt. Slots not listed use their default persona.
+    lineup_overrides: list[dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         # When render=True, the heavier env.step (~19ms) blows the 20ms tick
@@ -77,34 +84,59 @@ class EpisodeResult:
     error: Optional[str] = None
 
 
-def _build_agents(client: LLMClient, env: FootballEnvAdapter, bus: TeamMessageBus) -> tuple[list[PlayerAgent], dict[int, str]]:
-    """Mirror the demo's agent assembly. Returns (agents, slot->label)."""
+def _build_agents(
+    clients: list[LLMClient],
+    env: FootballEnvAdapter,
+    bus: TeamMessageBus,
+    n_per_side: int,
+    blue_team: tuple,
+    red_team: tuple,
+    overrides_by_slot: Optional[dict[int, str]] = None,
+) -> tuple[list[PlayerAgent], dict[int, str]]:
+    """Build N agents per side, binding each to a channel from `clients` round-robin.
+
+    `overrides_by_slot`: optional {global_slot: soul_text}. When a slot has an
+    entry, its persona's `custom_soul` is patched with the user's text — the
+    prompt builder then uses that text in place of the default
+    play_style+background block.
+    """
     raw = env.raw_obs
     role_arr_left = raw["left_team_roles"]
     role_arr_right = raw["right_team_roles"]
     agents: list[PlayerAgent] = []
     slot_to_label: dict[int, str] = {}
+    n_chan = len(clients)
+    overrides_by_slot = overrides_by_slot or {}
 
-    for slot in range(5):
+    def _chan(global_slot: int) -> LLMClient:
+        return clients[global_slot % n_chan]
+
+    def _maybe_patch(persona, global_slot: int):
+        soul = overrides_by_slot.get(global_slot)
+        if soul and soul.strip():
+            return dataclass_replace(persona, custom_soul=soul.strip())
+        return persona
+
+    for slot in range(n_per_side):
         player_id = slot
         role_id = int(role_arr_left[player_id])
         role_name = EgocentricFilter.GFOOTBALL_ROLE_TO_NAME.get(role_id, "CM")
-        persona = TEAM_BLUE_5V5[slot]
+        persona = _maybe_patch(blue_team[slot], slot)
         agents.append(PlayerAgent(
             slot=slot, player_id=player_id, team_side="left",
-            role=role_name, persona=persona, llm_client=client, bus=bus,
+            role=role_name, persona=persona, llm_client=_chan(slot), bus=bus,
         ))
         slot_to_label[slot] = f"蓝·{persona.name}#{persona.jersey_number} ({persona.position})"
 
-    for slot in range(5):
-        env_slot = 5 + slot
+    for slot in range(n_per_side):
+        env_slot = n_per_side + slot
         player_id = slot
         role_id = int(role_arr_right[player_id])
         role_name = EgocentricFilter.GFOOTBALL_ROLE_TO_NAME.get(role_id, "CM")
-        persona = TEAM_RED_5V5[slot]
+        persona = _maybe_patch(red_team[slot], env_slot)
         agents.append(PlayerAgent(
             slot=env_slot, player_id=player_id, team_side="right",
-            role=role_name, persona=persona, llm_client=client, bus=bus,
+            role=role_name, persona=persona, llm_client=_chan(env_slot), bus=bus,
         ))
         slot_to_label[env_slot] = f"红·{persona.name}#{persona.jersey_number} ({persona.position})"
 
@@ -115,6 +147,7 @@ def run_episode(
     config: EpisodeConfig,
     *,
     client: Optional[LLMClient] = None,
+    clients: Optional[list[LLMClient]] = None,
     on_decision: Optional[Callable[[dict], None]] = None,
     on_status: Optional[Callable[[str, dict], None]] = None,
     on_tick: Optional[Callable[[dict], None]] = None,
@@ -123,25 +156,51 @@ def run_episode(
 ) -> EpisodeResult:
     """Run one episode end-to-end. Blocks until done.
 
-    on_decision: invoked once per LLM decision with a JSON-safe dict
-                 (skill is already serialized). Use for live UI streaming.
-    on_status:   invoked with ("starting"|"running"|"finished", payload).
+    `clients`: optional list of pre-built LLMClient channels for per-agent binding.
+        Defaults to build_channel_pool() (4 channels for 11v11 multi-key load
+        balancing). Falls back to a 1-element list wrapping `client` for
+        single-channel mode (legacy 5v5 demos).
+    `client`:  legacy single-client mode. Wrapped into a 1-element pool if
+        `clients` is not provided.
     """
     started = time.time()
-    if client is None:
-        client = LLMClient.from_env()
+
+    # Resolve channel pool: explicit `clients` > explicit `client` > env-driven pool.
+    if clients is not None:
+        pool = clients
+    elif client is not None:
+        pool = [client]
+    else:
+        pool = build_channel_pool()
+
+    # Pick which team rosters to use based on scenario.
+    is_11v11 = "11v11" in config.scenario
+    n_per_side = 11 if is_11v11 else 5
+    blue_team = TEAM_BLUE_11V11 if is_11v11 else TEAM_BLUE_5V5
+    red_team  = TEAM_RED_11V11 if is_11v11 else TEAM_RED_5V5
+
+    if on_status:
+        on_status("initializing", {})
 
     env = FootballEnvAdapter(
         scenario=config.scenario,
         render=config.render,
-        n_controlled_left=5,
-        n_controlled_right=5,
+        n_controlled_left=n_per_side,
+        n_controlled_right=n_per_side,
         primary_player_slot=0,
         physics_steps_per_frame=config.physics_steps_per_frame,
     )
     env.reset()
     bus = TeamMessageBus()
-    agents, slot_to_label = _build_agents(client, env, bus)
+    overrides_by_slot = {
+        int(ov["slot"]): str(ov.get("soul", ""))
+        for ov in (config.lineup_overrides or [])
+        if "slot" in ov
+    }
+    agents, slot_to_label = _build_agents(
+        pool, env, bus, n_per_side, blue_team, red_team,
+        overrides_by_slot=overrides_by_slot,
+    )
 
     if on_status:
         on_status("starting", {
@@ -149,7 +208,8 @@ def run_episode(
                 {"slot": s, "label": slot_to_label[s]} for s in sorted(slot_to_label)
             ],
             "scenario": config.scenario,
-            "model": client.model,
+            "model": ", ".join(sorted({c.model for c in pool})),
+            "channels": len(pool),
         })
 
     fallback_installs = {"n": 0}
@@ -256,8 +316,8 @@ def run_many_episodes(
     on_episode_end: Optional[Callable[[int, EpisodeResult], None]] = None,
     on_status: Optional[Callable[[str, dict], None]] = None,
 ) -> list[EpisodeResult]:
-    """Run N episodes in series. Reuses one LLMClient across episodes."""
-    client = LLMClient.from_env()
+    """Run N episodes in series. Reuses one channel pool across episodes."""
+    pool = build_channel_pool()
     results: list[EpisodeResult] = []
     for i in range(n_episodes):
         ep_index = i + 1
@@ -272,7 +332,7 @@ def run_many_episodes(
 
         result = run_episode(
             config,
-            client=client,
+            clients=pool,
             on_decision=_wrap_on_decision if on_decision else None,
             on_status=_wrap_on_status if on_status else None,
         )

@@ -108,3 +108,83 @@ def teammate_by_jersey(obs: Observation, jersey: int) -> Optional[EntityView]:
         if t.entity_id == jersey:
             return t
     return None
+
+
+# ---------------------------------------------------------------------------
+# Defensive coordination helpers (Fix 1 & 2)
+# ---------------------------------------------------------------------------
+
+def ranked_threats(obs: Observation) -> list[EntityView]:
+    """Return opponents sorted by threat level (closest to our own goal first).
+
+    For the BLUE team (attacking toward +x, defending toward -x):
+      threat = how negative (i.e. how far into blue's half) the opponent's x is.
+    We approximate this by sorting ascending on position.x — the most negative
+    x is closest to the blue goal and most dangerous.
+
+    For the RED team (attacking toward -x, defending toward +x):
+      threat = how positive the opponent's x is.
+
+    In both cases the *defending* team's own goal sits at the extreme of their
+    half, so "closest x to our goal" is whichever extreme fits the side.
+
+    Because fallbacks are egocentric, we can't know which side we are on from
+    obs alone without reading self_state.team.  We therefore provide two
+    convenience wrappers below (blue_threats / red_threats) that callers use
+    directly — this function is internal.
+    """
+    opps = obs.opponents()
+    return opps  # caller re-sorts by the correct key
+
+
+def blue_ranked_threats(obs: Observation) -> list[EntityView]:
+    """Opponents sorted by threat for the BLUE team (own goal at x=-1).
+    Most dangerous = smallest x (deepest in blue's half).
+    """
+    opps = obs.opponents()
+    return sorted(opps, key=lambda e: e.position.x)
+
+
+def red_ranked_threats(obs: Observation) -> list[EntityView]:
+    """Opponents sorted by threat for the RED team (own goal at x=+1).
+    Most dangerous = largest x (deepest in red's half).
+    """
+    opps = obs.opponents()
+    return sorted(opps, key=lambda e: e.position.x, reverse=True)
+
+
+def get_defensive_line_x_blue(obs: Observation) -> float:
+    """Return the x-coordinate of the last (deepest) blue defender.
+
+    'Last defender' for blue = the teammate with the most-negative x
+    (nearest to blue's own goal at x=-1), excluding this player itself.
+    Falls back to -0.30 if no teammates visible.
+    """
+    teammates = obs.teammates()
+    if not teammates:
+        return -0.30
+    return min(t.position.x for t in teammates)
+
+
+def get_defensive_line_x_red(obs: Observation) -> float:
+    """Return the x-coordinate of the last (deepest) red defender.
+
+    'Last defender' for red = the teammate with the most-positive x
+    (nearest to red's own goal at x=+1), excluding this player itself.
+    Falls back to 0.30 if no teammates visible.
+    """
+    teammates = obs.teammates()
+    if not teammates:
+        return 0.30
+    return max(t.position.x for t in teammates)
+
+
+def ball_owned_by_opponent(obs: Observation) -> bool:
+    """True if any opponent in FOV is carrying the ball.
+    Falls back to checking whether ANY perceived entity with has_ball
+    is an opponent (handles cases where carrier is just barely visible).
+    """
+    for e in obs.opponents():
+        if e.has_ball:
+            return True
+    return False

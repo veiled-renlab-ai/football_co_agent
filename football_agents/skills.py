@@ -119,7 +119,41 @@ class PassTo(Skill):
     def is_valid(self, obs: "Observation") -> bool:
         if not obs.self_state.has_ball:
             return False
-        return any(t.entity_id == self.target_player_id for t in obs.teammates())
+        # Target teammate must be visible
+        target = next(
+            (t for t in obs.teammates() if t.entity_id == self.target_player_id),
+            None,
+        )
+        if target is None:
+            return False
+        # Pass-lane check: no opponent whose perpendicular distance to the
+        # passer->receiver segment is < 0.06 (and who is "between" the two).
+        # Uses point-to-segment distance formula, clamped to the segment.
+        try:
+            ax = obs.self_state.position.x
+            ay = obs.self_state.position.y
+            bx = target.position.x
+            by = target.position.y
+            seg_len_sq = (bx - ax) ** 2 + (by - ay) ** 2
+            for opp in obs.opponents():
+                px = opp.position.x
+                py = opp.position.y
+                if seg_len_sq < 1e-9:
+                    # Passer and receiver at same spot — treat as blocked
+                    return False
+                # Project opponent onto segment, clamp t to [0,1]
+                t = max(0.0, min(1.0, (
+                    (px - ax) * (bx - ax) + (py - ay) * (by - ay)
+                ) / seg_len_sq))
+                proj_x = ax + t * (bx - ax)
+                proj_y = ay + t * (by - ay)
+                perp_dist = ((px - proj_x) ** 2 + (py - proj_y) ** 2) ** 0.5
+                if perp_dist < 0.06:
+                    return False  # opponent is blocking the pass lane
+        except Exception:
+            # Defensive: if any field access fails, don't crash — allow pass
+            pass
+        return True
 
 
 @dataclass(frozen=True)
@@ -132,7 +166,29 @@ class Shoot(Skill):
     target_zone: ShootZone = "top_center"
 
     def is_valid(self, obs: "Observation") -> bool:
-        return obs.self_state.has_ball
+        if not obs.self_state.has_ball:
+            return False
+        # Distance and position constraints to prevent absurd long-range or
+        # extreme-angle shots (e.g. GK shooting from own box).
+        try:
+            bx = obs.self_state.position.x
+            by = obs.self_state.position.y
+            team = obs.self_state.team
+            if team == "team_a":
+                # team_a attacks right (opponent goal at x=+1)
+                if bx < 0.30:
+                    return False   # too far from goal
+            else:
+                # team_b attacks left (opponent goal at x=-1)
+                if bx > -0.30:
+                    return False   # too far from goal
+            # Angle constraint: too wide an angle → shot too difficult
+            if abs(by) > 0.38:
+                return False
+        except Exception:
+            # Defensive: if field access fails, fall back to simple has_ball check
+            pass
+        return True
 
 
 @dataclass(frozen=True)

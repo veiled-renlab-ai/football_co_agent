@@ -83,9 +83,14 @@ BROKER = RunBroker()
 
 # ----- API models --------------------------------------------------------
 
+class LineupSlotOverride(BaseModel):
+    slot: int = Field(..., ge=0, le=21)
+    soul: str = Field("", max_length=4000)
+
+
 class RunCreate(BaseModel):
     n_episodes: int = Field(1, ge=1, le=50)
-    scenario: str = Field("llm_5v5_full")
+    scenario: str = Field("llm_11v11_full")
     # Decisions cap kept high — match length is governed by wall-clock now.
     max_decisions_total: int = Field(100_000, ge=1, le=1_000_000)
     # Default = 90 game minutes (5400s). Real-time pacing locks game-sec = wall-sec.
@@ -97,21 +102,15 @@ class RunCreate(BaseModel):
     tick_stream_every_ticks: int = Field(5, ge=1, le=50)
     # 3D frame stream cadence (only meaningful with render=True). 3 = ~17 fps video.
     frame_stream_every_ticks: int = Field(3, ge=1, le=50)
-    render: bool = Field(
-        True,
-        description="Render gfootball 3D scene (EGL off-screen when DISPLAY unset). "
-                    "Required for the live video stream in the UI.",
-    )
-    stop_world_mode: bool = Field(
-        False,
-        description="Pause env while all agents decide; resume after all respond. "
-                    "Agents see a stable world snapshot — no stale-obs problem. "
-                    "Tradeoff: match pace = slowest agent's LLM latency.",
-    )
+    # render=False: Three.js handles visualization, no need for gfootball EGL render.
+    render: bool = Field(False)
+    # Stop-world is now the only supported mode.
+    stop_world_mode: bool = Field(True)
     stop_world_timeout: float = Field(
         8.0, ge=1.0, le=60.0,
         description="Seconds to wait per decision cycle before timing out laggard agents.",
     )
+    lineup_overrides: list[LineupSlotOverride] = Field(default_factory=list)
 
 
 # Map run_id -> active MultiAgentRunner so the stop endpoint can request it.
@@ -140,6 +139,7 @@ def _run_in_background(run_id: str, body: RunCreate, loop: asyncio.AbstractEvent
         render=body.render,
         stop_world_mode=body.stop_world_mode,
         stop_world_timeout=body.stop_world_timeout,
+        lineup_overrides=[ov.model_dump() for ov in body.lineup_overrides],
     )
 
     meta: dict[str, Any] = {
@@ -199,17 +199,17 @@ def _run_in_background(run_id: str, body: RunCreate, loop: asyncio.AbstractEvent
             def _on_frame(frame_ndarray) -> None:
                 """Encode RGB frame to JPEG and publish to /stream subscribers.
 
-                Strict 1:1 with gfootball: native 1280×720, no resize, no
-                color/brightness post-processing. JPEG q=95 is visually
-                indistinguishable from PNG at this size, but ~5x smaller.
-                Skips encode if no one's subscribed.
+                Applies frame_fx post-processing (HUD removal + edge glow +
+                vignette) before encoding.  Skips if no one is subscribed.
                 """
                 if FRAME_BUS.num_subscribers(run_id) == 0:
                     return
                 try:
                     import cv2
+                    from . import frame_fx
                     bgr = cv2.cvtColor(frame_ndarray, cv2.COLOR_RGB2BGR)
-                    ok, jpg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    bgr = frame_fx.process(bgr)
+                    ok, jpg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 92])
                     if ok:
                         FRAME_BUS.publish_threadsafe(run_id, jpg.tobytes(), loop)
                 except Exception as e:
@@ -274,6 +274,61 @@ async def _async_publish(run_id: str, evt: dict) -> None:
 
 
 # ----- routes ------------------------------------------------------------
+
+@app.get("/api/lineup_template")
+def api_lineup_template(scenario: str = "llm_11v11_full") -> JSONResponse:
+    """Return 22 default personas + per-slot FIFA-style soul suggestions.
+
+    Frontend renders 11 blue + 11 red cards from this. Each entry has:
+      - slot       global slot index (blue 0-10, red 11-21)
+      - team       "blue" | "red"
+      - name       Chinese persona name (e.g. 林涛)
+      - jersey     jersey number
+      - position   human-readable position label
+      - default    current play_style + background (the LLM's default text)
+      - fifa       optional FIFA-style template (load on "Apply FIFA defaults")
+    """
+    from ..players import (
+        TEAM_BLUE_5V5, TEAM_BLUE_11V11, TEAM_RED_5V5, TEAM_RED_11V11,
+    )
+    is_11v11 = "11v11" in scenario
+    blue_team = TEAM_BLUE_11V11 if is_11v11 else TEAM_BLUE_5V5
+    red_team  = TEAM_RED_11V11 if is_11v11 else TEAM_RED_5V5
+
+    # Load FIFA defaults from disk (best-effort; falls back to empty if missing).
+    fifa_path = Path(__file__).resolve().parent / "data" / "fifa_defaults.json"
+    fifa_blue: dict[int, dict] = {}
+    fifa_red:  dict[int, dict] = {}
+    if fifa_path.exists():
+        try:
+            fifa = json.loads(fifa_path.read_text(encoding="utf-8"))
+            fifa_blue = {int(e["slot"]): e for e in fifa.get("blue", [])}
+            fifa_red  = {int(e["slot"]): e for e in fifa.get("red", [])}
+        except Exception as e:
+            logger.warning("failed to load FIFA defaults: %s", e)
+
+    def _entry(persona, team: str, slot: int, fifa_for_slot: dict) -> dict:
+        return {
+            "slot": slot,
+            "team": team,
+            "name": persona.name,
+            "jersey": persona.jersey_number,
+            "position": persona.position,
+            "default": f"{persona.background}\n\n我的球风是 —— {persona.play_style}",
+            "fifa_player": fifa_for_slot.get("fifa_player", ""),
+            "fifa": fifa_for_slot.get("soul", ""),
+        }
+
+    blue_entries = [
+        _entry(blue_team[i], "blue", i, fifa_blue.get(i, {}))
+        for i in range(len(blue_team))
+    ]
+    red_entries = [
+        _entry(red_team[i], "red", len(blue_team) + i, fifa_red.get(i, {}))
+        for i in range(len(red_team))
+    ]
+    return JSONResponse({"blue": blue_entries, "red": red_entries})
+
 
 @app.get("/api/runs")
 def api_list_runs() -> JSONResponse:

@@ -59,6 +59,12 @@ class PlayerPersona:
     position_discipline: Optional[str] = None  # per-position behavioral
                                                # guide (Phase 5e). None =
                                                # no position section in prompt.
+    custom_soul: Optional[str] = None    # user-injected free-form text. When
+                                         # set, REPLACES the background +
+                                         # play_style block in the system
+                                         # prompt — lets users hand-craft a
+                                         # player's personality / FIFA-style
+                                         # template before kickoff.
 
 
 DEFAULT_PERSONA = PlayerPersona(
@@ -132,13 +138,17 @@ def build_system_prompt(persona: PlayerPersona) -> str:
     else:
         position_discipline_section = ""
 
+    # Custom soul (user-injected) replaces the default background+play_style block.
+    if persona.custom_soul and persona.custom_soul.strip():
+        identity_block = persona.custom_soul.strip()
+    else:
+        identity_block = f"{persona.background}\n\n我的球风是 —— {persona.play_style}"
+
     return f"""# 我是{persona.name}
 
 我是 {persona.name}，{persona.age} 岁，{persona.nationality}人，{persona.team}的{persona.position}，球衣 {persona.jersey_number} 号。
 
-{persona.background}
-
-我的球风是 —— {persona.play_style}
+{identity_block}
 {universal_discipline_section}
 {team_section}
 {position_discipline_section}
@@ -329,6 +339,35 @@ _STATUS_CN = {
 }
 
 
+def _position_anchor_hint(position: str) -> str:
+    """Return a short Chinese string with the per-position default anchor coords.
+
+    These match the fallback layer constants so the LLM and the fallback agree
+    on where "home position" is. Coordinates use the egocentric convention that
+    gfootball applies to all players: +x = toward opponent goal.
+
+    Returns empty string for unrecognised position strings (safe fallback).
+    """
+    # Map common position labels to anchor description. Both teams share the
+    # same egocentric coord system so one table covers everyone.
+    _ANCHORS: dict[str, str] = {
+        # 守门员
+        "守门员": "x≈-0.97, y=0（贴门线中央）。开球时直接 MoveTo(-0.97, 0.0)。",
+        # 中后卫
+        "中后卫": "x≈-0.20, y=+0.10（自家半场中路）。开球时直接 MoveTo(-0.20, 0.10)。",
+        # 左后卫
+        "左后卫": "x≈-0.15, y=-0.25（自家半场左路）。开球时直接 MoveTo(-0.15, -0.25)。",
+        # 右前卫 / 右中场
+        "右前卫": "x≈+0.15, y=+0.32（右侧边线附近）。开球时直接 MoveTo(0.15, 0.32)。y 必须 ≥ +0.15，不进中路。",
+        "右中场": "x≈+0.15, y=+0.32（右侧边线附近）。开球时直接 MoveTo(0.15, 0.32)。y 必须 ≥ +0.15，不进中路。",
+        # 中锋
+        "中锋": "x≈+0.55, y=0（对方半场中路禁区前）。开球时直接 MoveTo(0.55, 0.0)。y 保持 ±0.20 内，不去边路。",
+        # 进攻型中场（DEFAULT_PERSONA 兜底）
+        "进攻型中场": "x≈+0.10, y=0（中场靠前）。",
+    }
+    return _ANCHORS.get(position, "")
+
+
 def render_observation(obs: Observation, persona: PlayerPersona) -> str:
     """Render observation as natural Chinese football commentary for the LLM.
 
@@ -344,6 +383,19 @@ def render_observation(obs: Observation, persona: PlayerPersona) -> str:
     lines: list[str] = []
 
     lines.append(f"【比赛进行到 {obs.match_clock}，比分 {obs.score[0]} : {obs.score[1]}】")
+
+    # Kickoff / early-game alert — injected when game_mode is KickOff (1) or
+    # within the first 50 env ticks (~1s) to catch both "game just started"
+    # and "just conceded / restart" situations.
+    _is_kickoff = (obs.game_mode == 1) or (obs.tick < 50)
+    if _is_kickoff:
+        lines.append("")
+        lines.append(
+            "🚨 **【开球阶段 / 比赛重启】** 🚨\n"
+            "比赛刚开始或刚重启。**此刻最重要的事：跑回你的主站位，而不是冲向中圈(0,0)。**\n"
+            "不管球在哪里，先回到位置。等球转移到你的区域再行动。"
+        )
+
     lines.append("")
 
     # Self — position + speed + facing + stamina (so LLM has full self-awareness)
@@ -495,6 +547,12 @@ def render_observation(obs: Observation, persona: PlayerPersona) -> str:
         lines.append(
             f"• 球的精确坐标：({ball.position.x:+.2f}, {ball.position.y:+.2f})"
         )
+
+    # Per-position anchor — always shown so the LLM can call MoveTo with exact
+    # numbers when returning to position (especially during kickoff).
+    anchor_line = _position_anchor_hint(persona.position)
+    if anchor_line:
+        lines.append(f"• **你的主站位锚点**：{anchor_line}")
 
     lines.append("")
     lines.append(f"轮到你了，{persona.name}。一两句话说你的判断，然后调一个工具。")
